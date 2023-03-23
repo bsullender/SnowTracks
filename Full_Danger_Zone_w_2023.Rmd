@@ -1,0 +1,3094 @@
+---
+title: "Defining the Danger Zone: R Script"
+author: "Ben Sullender & Calum Cunningham"
+date: '2022-11-23, adapted to include 2023 data 3/23/23'
+output:
+  html_document:
+    toc: yes
+    toc_depth: '4'
+    toc_float: yes
+  html_notebook:
+    toc: yes
+    toc_depth: '4'
+    toc_float: yes
+    number_sections: no
+    df_print: paged
+    theme: lumen
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(MuMIn)
+library(segmented)
+library(mgcv)
+library(mgcViz)
+library(RColorBrewer)
+
+```
+
+## Overview
+
+This document details the methods for the manuscript "Defining the danger zone: Critical snow support thresholds for predator-prey interactions," in preparation for publication as of Nov 2022. 
+
+This script has five components:
+
++ Part 1: Single-species Snow Variable Selection
++ Part 2: Multi-species Snow Variable Selection
++ Part 3: Regional Comparison
++ Part 4: Determine Breakpoints
++ Part 5: Predator-Prey Pair Plots
+
+Before we dive into any of those four parts, we need to set up our data first.
+
+```{r Set-up Data}
+inTrax <- read.csv("./TraxCalcRevised2023.csv")
+
+summa <- inTrax
+
+summaryStats <- as.data.frame(NA) %>%
+  mutate(meanTrackDepth = mean(summa$AvgTrackDepth,na.rm=T),
+         nLessThan30cm = nrow(summa[summa$AvgTrackDepth<=30,]),
+         meanTuna = mean(summa$AvgTuna,na.rm=T),
+         minDens010 = min(summa$AvgDens010,na.rm=T),
+         maxDens010 = max(summa$AvgDens010,na.rm=T),
+         minDens020 = min(summa$AvgDens020,na.rm=T),
+         maxDens020 = max(summa$AvgDens020,na.rm=T),
+         minDens030 = min(summa$AvgDens030,na.rm=T),
+         maxDens030 = max(summa$AvgDens030,na.rm=T),
+         maxIce = max(summa$TotalIce50)) 
+write.csv(summaryStats,"SummaryStats.csv")
+# First, let's summarize what we have.
+summaryTableReg <- inTrax %>% group_by(Species,Region) %>%
+  summarize(nobs = n())
+write.csv(summaryTableReg,"SummaryTable2023byReg.csv")
+summaryTableSpp <- inTrax %>% group_by(Species) %>%
+  summarize(nobs = n(),avgSink = mean(AvgTrackDepth,na.rm=T),
+            tWid = mean(Track.width,na.rm=T),tLen = mean(Track.length,na.rm=T))
+write.csv(summaryTableSpp,"SummaryTable2023bySpp.csv")
+
+# Adding 0.0001 to track depth so we can use gamma dist. with glm
+inTrax$AvgTrackDepth <- c(inTrax$AvgTrackDepth+0.00001)
+
+# Create species-specific subsets, to be combined before each plot
+
+datAll <- inTrax[inTrax$Species %in% c("Caribou","Coyote","Moose","Moose-Juv","Wolf","Deer","Cougar","Bobcat"),]
+
+
+# Dropping frequently NA fields that we no longer need - otherwise reduces sample size when we na omit
+datAll <- datAll %>%
+  dplyr::select(!c(Track.length,Track.width,Time,X,Latitude,Longitude,Surface.temp,
+                   Stride.Pattern,Age.class,Vegetation.Type))
+
+datAllNoNA <- na.omit(datAll)
+# This omits 5 obs with NA tunas
+nrow(datAll)
+nrow(datAllNoNA)
+
+datAll <- datAllNoNA
+
+
+
+options(na.action = "na.fail")
+
+```
+
+### Part 1: Single-species Snow Variable Selection
+This part will determine the best snow variable for each species' sink depth. Hence, the same process will be run six times, once for each species.
+
+#### We'll start with results for bobcats.
+
+```{r Bobcat, echo=FALSE}
+# Set our species of interest here
+datSp <- datAll[datAll$Species=="Bobcat",]
+  sppData <- datSp
+
+# Density Dredge
+
+# Set up a GAM and dredge it
+  dens.gam <- gam(AvgTrackDepth~s(AvgDens010,k=6)+s(AvgDens020,k=6)+s(AvgDens030,k=6),family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  dens.dredge <- dredge(dens.gam,m.lim=c(1,1))
+
+  dens.best1 <- get.models(dens.dredge,1)[[1]]
+  dens.best2 <- get.models(dens.dredge,2)[[1]]
+  dens.best3 <- get.models(dens.dredge,3)[[1]]
+  dens.dredge$rSq <- rbind(summary(dens.best1)$r.sq,
+                           summary(dens.best2)$r.sq,
+                           summary(dens.best3)$r.sq)
+
+  dens.dredge$dev <- rbind(summary(dens.best1)$dev.expl,
+                           summary(dens.best2)$dev.expl,
+                           summary(dens.best3)$dev.expl)
+
+  write.csv(dens.dredge,paste0(sppData$Species[1],".dens.dredge.csv"))
+  dens.dredge
+
+# Ice Dredge
+# GAM doesn't work since there's only 0s and 1s, therefore there's only 2 values - so not enough for k
+#       instead, we'll just use GLM.
+  
+
+# set up a GAM and dredge it
+  ice.gam <- gam(AvgTrackDepth~IceTop10+IceTop20+IceTop30+IceTop40+IceTop50,family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  ice.dredge <- dredge(ice.gam,m.lim=c(1,1))
+  
+  ice.best1 <- get.models(ice.dredge,1)[[1]]
+  ice.best2 <- get.models(ice.dredge,2)[[1]]
+  ice.best3 <- get.models(ice.dredge,3)[[1]]
+  ice.best4 <- get.models(ice.dredge,4)[[1]]
+  ice.best5 <- get.models(ice.dredge,5)[[1]]
+  
+  ice.dredge$rSq <- rbind(summary(ice.best1)$r.sq,
+                          summary(ice.best2)$r.sq,
+                          summary(ice.best3)$r.sq,
+                          summary(ice.best4)$r.sq,
+                          summary(ice.best5)$r.sq)
+  
+  ice.dredge$dev <- rbind(summary(ice.best1)$dev.expl,
+                           summary(ice.best2)$dev.expl,
+                           summary(ice.best3)$dev.expl,
+                           summary(ice.best4)$dev.expl,
+                           summary(ice.best5)$dev.expl)
+  
+ write.csv(ice.dredge,paste0(sppData$Species[1],".ice.dredge.csv"))
+  ice.dredge
+  
+# HH Dredge
+
+# For low N obs, need to specify 5-term separately then model.sel them.
+  hh1 <- gam(AvgTrackDepth~s(AvgHH0.10,k=6),family=Gamma(link="log"),data=sppData)
+  hh2 <- gam(AvgTrackDepth~s(AvgHH0.20,k=6),family=Gamma(link="log"),data=sppData)
+  hh3 <- gam(AvgTrackDepth~s(AvgHH0.30,k=6),family=Gamma(link="log"),data=sppData)
+  hh4 <- gam(AvgTrackDepth~s(AvgHH0.40,k=6),family=Gamma(link="log"),data=sppData)
+  hh5 <- gam(AvgTrackDepth~s(AvgHH0.50,k=6),family=Gamma(link="log"),data=sppData)
+  sepRes <- model.sel(hh1,hh2,hh3,hh4,hh5)
+
+# now convert to data frame so we can add on an r.sq column.
+  sepResDF <- as.data.frame(sepRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+    arrange(`s(AvgHH0.10, k = 6)`,`s(AvgHH0.20, k = 6)`,`s(AvgHH0.30, k = 6)`,`s(AvgHH0.40, k = 6)`,`s(AvgHH0.50, k = 6)`)
+  sepResDF$rSq <- rbind(summary(hh1)$r.sq,summary(hh2)$r.sq,summary(hh3)$r.sq,summary(hh4)$r.sq,summary(hh5)$r.sq)
+  sepResDF$dev.expl <- rbind(summary(hh1)$dev.expl,summary(hh2)$dev.expl,summary(hh3)$dev.expl,summary(hh4)$dev.expl,summary(hh5)$dev.expl)
+  
+  write.csv(sepResDF,paste0(sppData$Species[1],".hh.dredge.csv"))
+
+  
+# IceTotal Dredge
+
+# when there are many pits with no ice, there are very few unique covariate terms, which makes GAM throw an error
+#     For low N obs, need to specify 5-term separately then model.sel them.
+#     this assumes that the deeper layers have more options for ice thickness
+  ifelse(length(unique(sppData$TotalIce10))>5,{
+        
+# if there's enough combinations of covariate terms, we'll stick with 6 knots
+        it1 <- gam(AvgTrackDepth~s(TotalIce10,k=6),family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~s(TotalIce20,k=6),family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~s(TotalIce30,k=6),family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~s(TotalIce40,k=6),family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~s(TotalIce50,k=6),family=Gamma(link="log"),data=sppData)},
+        
+# but if not, we'll switch to a non-GAM GLM.
+        {it1 <- gam(AvgTrackDepth~TotalIce10,family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~TotalIce20,family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~TotalIce30,family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~TotalIce40,family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~TotalIce50,family=Gamma(link="log"),data=sppData)})
+        
+        
+        sepITRes <- model.sel(it1,it2,it3,it4,it5)
+# now convert to data frame so we can add on an r.sq column.
+        sepITResDF <- as.data.frame(sepITRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+          arrange(sepITRes[,2],sepITRes[,3],sepITRes[,4],sepITRes[,5],sepITRes[,6])
+        sepITResDF$rSq <- rbind(summary(it1)$r.sq,summary(it2)$r.sq,summary(it3)$r.sq,summary(it4)$r.sq,summary(it5)$r.sq)
+        sepITResDF$dev.expl <- rbind(summary(it1)$dev.expl,summary(it2)$dev.expl,summary(it3)$dev.expl,summary(it4)$dev.expl,summary(it5)$dev.expl)
+
+        
+ write.csv(sepITResDF,paste0(sppData$Species[1],".iceTotal.dredge.csv"))
+     # sepITResDF
+
+        tuna.gam <- gam(AvgTrackDepth~s(AvgTuna,k=5), family=Gamma(link="log"),data=sppData)
+        summary(tuna.gam)$dev.expl
+
+```
+
+#### Next, results for cougar
+
+```{r Cougar, echo=FALSE}
+# Set our species of interest here
+datSp <- datAll[datAll$Species=="Cougar",]
+  sppData <- datSp
+
+# Density Dredge
+
+# Set up a GAM and dredge it
+  dens.gam <- gam(AvgTrackDepth~s(AvgDens010,k=6)+s(AvgDens020,k=6)+s(AvgDens030,k=6),family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  dens.dredge <- dredge(dens.gam,m.lim=c(1,1))
+
+  dens.best1 <- get.models(dens.dredge,1)[[1]]
+  dens.best2 <- get.models(dens.dredge,2)[[1]]
+  dens.best3 <- get.models(dens.dredge,3)[[1]]
+  dens.dredge$rSq <- rbind(summary(dens.best1)$r.sq,
+                           summary(dens.best2)$r.sq,
+                           summary(dens.best3)$r.sq)
+
+  dens.dredge$dev <- rbind(summary(dens.best1)$dev.expl,
+                           summary(dens.best2)$dev.expl,
+                           summary(dens.best3)$dev.expl)
+
+  write.csv(dens.dredge,paste0(sppData$Species[1],".dens.dredge.csv"))
+  dens.dredge
+
+# Ice Dredge
+# GAM doesn't work since there's only 0s and 1s, therefore there's only 2 values - so not enough for k
+#       instead, we'll just use GLM.
+  
+
+# set up a GAM and dredge it
+  ice.gam <- gam(AvgTrackDepth~IceTop10+IceTop20+IceTop30+IceTop40+IceTop50,family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  ice.dredge <- dredge(ice.gam,m.lim=c(1,1))
+  
+  ice.best1 <- get.models(ice.dredge,1)[[1]]
+  ice.best2 <- get.models(ice.dredge,2)[[1]]
+  ice.best3 <- get.models(ice.dredge,3)[[1]]
+  ice.best4 <- get.models(ice.dredge,4)[[1]]
+  ice.best5 <- get.models(ice.dredge,5)[[1]]
+  
+  ice.dredge$rSq <- rbind(summary(ice.best1)$r.sq,
+                          summary(ice.best2)$r.sq,
+                          summary(ice.best3)$r.sq,
+                          summary(ice.best4)$r.sq,
+                          summary(ice.best5)$r.sq)
+  
+  ice.dredge$dev <- rbind(summary(ice.best1)$dev.expl,
+                           summary(ice.best2)$dev.expl,
+                           summary(ice.best3)$dev.expl,
+                           summary(ice.best4)$dev.expl,
+                           summary(ice.best5)$dev.expl)
+  
+ write.csv(ice.dredge,paste0(sppData$Species[1],".ice.dredge.csv"))
+  ice.dredge
+  
+# HH Dredge
+
+# For low N obs, need to specify 5-term separately then model.sel them.
+  hh1 <- gam(AvgTrackDepth~s(AvgHH0.10,k=6),family=Gamma(link="log"),data=sppData)
+  hh2 <- gam(AvgTrackDepth~s(AvgHH0.20,k=6),family=Gamma(link="log"),data=sppData)
+  hh3 <- gam(AvgTrackDepth~s(AvgHH0.30,k=6),family=Gamma(link="log"),data=sppData)
+  hh4 <- gam(AvgTrackDepth~s(AvgHH0.40,k=6),family=Gamma(link="log"),data=sppData)
+  hh5 <- gam(AvgTrackDepth~s(AvgHH0.50,k=6),family=Gamma(link="log"),data=sppData)
+  sepRes <- model.sel(hh1,hh2,hh3,hh4,hh5)
+
+# now convert to data frame so we can add on an r.sq column.
+  sepResDF <- as.data.frame(sepRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+    arrange(`s(AvgHH0.10, k = 6)`,`s(AvgHH0.20, k = 6)`,`s(AvgHH0.30, k = 6)`,`s(AvgHH0.40, k = 6)`,`s(AvgHH0.50, k = 6)`)
+  sepResDF$rSq <- rbind(summary(hh1)$r.sq,summary(hh2)$r.sq,summary(hh3)$r.sq,summary(hh4)$r.sq,summary(hh5)$r.sq)
+  sepResDF$dev.expl <- rbind(summary(hh1)$dev.expl,summary(hh2)$dev.expl,summary(hh3)$dev.expl,summary(hh4)$dev.expl,summary(hh5)$dev.expl)
+  
+  write.csv(sepResDF,paste0(sppData$Species[1],".hh.dredge.csv"))
+
+  
+# IceTotal Dredge
+
+# when there are many pits with no ice, there are very few unique covariate terms, which makes GAM throw an error
+#     For low N obs, need to specify 5-term separately then model.sel them.
+#     this assumes that the deeper layers have more options for ice thickness
+  ifelse(length(unique(sppData$TotalIce10))>5,{
+        
+# if there's enough combinations of covariate terms, we'll stick with 6 knots
+        it1 <- gam(AvgTrackDepth~s(TotalIce10,k=6),family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~s(TotalIce20,k=6),family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~s(TotalIce30,k=6),family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~s(TotalIce40,k=6),family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~s(TotalIce50,k=6),family=Gamma(link="log"),data=sppData)},
+        
+# but if not, we'll switch to a non-GAM GLM.
+        {it1 <- gam(AvgTrackDepth~TotalIce10,family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~TotalIce20,family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~TotalIce30,family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~TotalIce40,family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~TotalIce50,family=Gamma(link="log"),data=sppData)})
+        
+        
+        sepITRes <- model.sel(it1,it2,it3,it4,it5)
+# now convert to data frame so we can add on an r.sq column.
+        sepITResDF <- as.data.frame(sepITRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+          arrange(sepITRes[,2],sepITRes[,3],sepITRes[,4],sepITRes[,5],sepITRes[,6])
+        sepITResDF$rSq <- rbind(summary(it1)$r.sq,summary(it2)$r.sq,summary(it3)$r.sq,summary(it4)$r.sq,summary(it5)$r.sq)
+        sepITResDF$dev.expl <- rbind(summary(it1)$dev.expl,summary(it2)$dev.expl,summary(it3)$dev.expl,summary(it4)$dev.expl,summary(it5)$dev.expl)
+
+        
+ write.csv(sepITResDF,paste0(sppData$Species[1],".iceTotal.dredge.csv"))
+     # sepITResDF
+
+        tuna.gam <- gam(AvgTrackDepth~s(AvgTuna,k=5), family=Gamma(link="log"),data=sppData)
+        summary(tuna.gam)$dev.expl
+
+```
+
+#### Next up, caribou. 
+
+```{r Caribou,echo=FALSE}
+datSp <- datAllNoNA[datAllNoNA$Species=="Caribou",]
+
+  sppData <- datSp
+
+# Density Dredge
+
+# Set up a GAM and dredge it
+  dens.gam <- gam(AvgTrackDepth~s(AvgDens010,k=6)+s(AvgDens020,k=6)+s(AvgDens030,k=6),family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  dens.dredge <- dredge(dens.gam,m.lim=c(1,1))
+
+  dens.best1 <- get.models(dens.dredge,1)[[1]]
+  dens.best2 <- get.models(dens.dredge,2)[[1]]
+  dens.best3 <- get.models(dens.dredge,3)[[1]]
+  dens.dredge$rSq <- rbind(summary(dens.best1)$r.sq,
+                           summary(dens.best2)$r.sq,
+                           summary(dens.best3)$r.sq)
+
+  dens.dredge$dev <- rbind(summary(dens.best1)$dev.expl,
+                           summary(dens.best2)$dev.expl,
+                           summary(dens.best3)$dev.expl)
+
+  write.csv(dens.dredge,paste0(sppData$Species[1],".dens.dredge.csv"))
+  dens.dredge
+
+# Ice Dredge
+# GAM doesn't work since there's only 0s and 1s, therefore there's only 2 values - so not enough for k
+#       instead, we'll just use GLM.
+  
+
+# set up a GAM and dredge it
+  ice.gam <- gam(AvgTrackDepth~IceTop10+IceTop20+IceTop30+IceTop40+IceTop50,family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  ice.dredge <- dredge(ice.gam,m.lim=c(1,1))
+  
+  ice.best1 <- get.models(ice.dredge,1)[[1]]
+  ice.best2 <- get.models(ice.dredge,2)[[1]]
+  ice.best3 <- get.models(ice.dredge,3)[[1]]
+  ice.best4 <- get.models(ice.dredge,4)[[1]]
+  ice.best5 <- get.models(ice.dredge,5)[[1]]
+  
+  ice.dredge$rSq <- rbind(summary(ice.best1)$r.sq,
+                          summary(ice.best2)$r.sq,
+                          summary(ice.best3)$r.sq,
+                          summary(ice.best4)$r.sq,
+                          summary(ice.best5)$r.sq)
+  
+  ice.dredge$dev <- rbind(summary(ice.best1)$dev.expl,
+                           summary(ice.best2)$dev.expl,
+                           summary(ice.best3)$dev.expl,
+                           summary(ice.best4)$dev.expl,
+                           summary(ice.best5)$dev.expl)
+  
+ write.csv(ice.dredge,paste0(sppData$Species[1],".ice.dredge.csv"))
+  ice.dredge
+  
+# HH Dredge
+
+# For low N obs, need to specify 5-term separately then model.sel them.
+  hh1 <- gam(AvgTrackDepth~s(AvgHH0.10,k=6),family=Gamma(link="log"),data=sppData)
+  hh2 <- gam(AvgTrackDepth~s(AvgHH0.20,k=6),family=Gamma(link="log"),data=sppData)
+  hh3 <- gam(AvgTrackDepth~s(AvgHH0.30,k=6),family=Gamma(link="log"),data=sppData)
+  hh4 <- gam(AvgTrackDepth~s(AvgHH0.40,k=6),family=Gamma(link="log"),data=sppData)
+  hh5 <- gam(AvgTrackDepth~s(AvgHH0.50,k=6),family=Gamma(link="log"),data=sppData)
+  sepRes <- model.sel(hh1,hh2,hh3,hh4,hh5)
+
+# now convert to data frame so we can add on an r.sq column.
+  sepResDF <- as.data.frame(sepRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+    arrange(`s(AvgHH0.10, k = 6)`,`s(AvgHH0.20, k = 6)`,`s(AvgHH0.30, k = 6)`,`s(AvgHH0.40, k = 6)`,`s(AvgHH0.50, k = 6)`)
+  sepResDF$rSq <- rbind(summary(hh1)$r.sq,summary(hh2)$r.sq,summary(hh3)$r.sq,summary(hh4)$r.sq,summary(hh5)$r.sq)
+  sepResDF$dev.expl <- rbind(summary(hh1)$dev.expl,summary(hh2)$dev.expl,summary(hh3)$dev.expl,summary(hh4)$dev.expl,summary(hh5)$dev.expl)
+  
+  write.csv(sepResDF,paste0(sppData$Species[1],".hh.dredge.csv"))
+sepResDF
+  
+# IceTotal Dredge
+
+# when there are many pits with no ice, there are very few unique covariate terms, which makes GAM throw an error
+#     For low N obs, need to specify 5-term separately then model.sel them.
+#     this assumes that the deeper layers have more options for ice thickness
+  ifelse(length(unique(sppData$TotalIce10))>5,{
+        
+# if there's enough combinations of covariate terms, we'll stick with 6 knots
+        it1 <- gam(AvgTrackDepth~s(TotalIce10,k=6),family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~s(TotalIce20,k=6),family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~s(TotalIce30,k=6),family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~s(TotalIce40,k=6),family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~s(TotalIce50,k=6),family=Gamma(link="log"),data=sppData)},
+        
+# but if not, we'll switch to a non-GAM GLM.
+        {it1 <- gam(AvgTrackDepth~TotalIce10,family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~TotalIce20,family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~TotalIce30,family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~TotalIce40,family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~TotalIce50,family=Gamma(link="log"),data=sppData)})
+        
+        
+        sepITRes <- model.sel(it1,it2,it3,it4,it5)
+# now convert to data frame so we can add on an r.sq column.
+        sepITResDF <- as.data.frame(sepITRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+          arrange(sepITRes[,2],sepITRes[,3],sepITRes[,4],sepITRes[,5],sepITRes[,6])
+        sepITResDF$rSq <- rbind(summary(it1)$r.sq,summary(it2)$r.sq,summary(it3)$r.sq,summary(it4)$r.sq,summary(it5)$r.sq)
+        sepITResDF$dev.expl <- rbind(summary(it1)$dev.expl,summary(it2)$dev.expl,summary(it3)$dev.expl,summary(it4)$dev.expl,summary(it5)$dev.expl)
+
+        
+ write.csv(sepITResDF,paste0(sppData$Species[1],".iceTotal.dredge.csv"))
+      sepITResDF
+
+        tuna.gam <- gam(AvgTrackDepth~s(AvgTuna,k=5), family=Gamma(link="log"),data=sppData)
+        summary(tuna.gam)$dev.expl
+
+```
+
+#### Third, coyotes.
+
+```{r Coyote, echo=FALSE}
+datSp <- datAllNoNA[datAllNoNA$Species=="Coyote",]
+
+  sppData <- datSp
+
+# Density Dredge
+
+# Set up a GAM and dredge it
+  dens.gam <- gam(AvgTrackDepth~s(AvgDens010,k=6)+s(AvgDens020,k=6)+s(AvgDens030,k=6),family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  dens.dredge <- dredge(dens.gam,m.lim=c(1,1))
+
+  dens.best1 <- get.models(dens.dredge,1)[[1]]
+  dens.best2 <- get.models(dens.dredge,2)[[1]]
+  dens.best3 <- get.models(dens.dredge,3)[[1]]
+  dens.dredge$rSq <- rbind(summary(dens.best1)$r.sq,
+                           summary(dens.best2)$r.sq,
+                           summary(dens.best3)$r.sq)
+
+  dens.dredge$dev <- rbind(summary(dens.best1)$dev.expl,
+                           summary(dens.best2)$dev.expl,
+                           summary(dens.best3)$dev.expl)
+
+  write.csv(dens.dredge,paste0(sppData$Species[1],".dens.dredge.csv"))
+  dens.dredge
+
+# Ice Dredge
+# GAM doesn't work since there's only 0s and 1s, therefore there's only 2 values - so not enough for k
+#       instead, we'll just use GLM.
+  
+
+# set up a GAM and dredge it
+  ice.gam <- gam(AvgTrackDepth~IceTop10+IceTop20+IceTop30+IceTop40+IceTop50,family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  ice.dredge <- dredge(ice.gam,m.lim=c(1,1))
+  
+  ice.best1 <- get.models(ice.dredge,1)[[1]]
+  ice.best2 <- get.models(ice.dredge,2)[[1]]
+  ice.best3 <- get.models(ice.dredge,3)[[1]]
+  ice.best4 <- get.models(ice.dredge,4)[[1]]
+  ice.best5 <- get.models(ice.dredge,5)[[1]]
+  
+  ice.dredge$rSq <- rbind(summary(ice.best1)$r.sq,
+                          summary(ice.best2)$r.sq,
+                          summary(ice.best3)$r.sq,
+                          summary(ice.best4)$r.sq,
+                          summary(ice.best5)$r.sq)
+  
+  ice.dredge$dev <- rbind(summary(ice.best1)$dev.expl,
+                           summary(ice.best2)$dev.expl,
+                           summary(ice.best3)$dev.expl,
+                           summary(ice.best4)$dev.expl,
+                           summary(ice.best5)$dev.expl)
+  
+write.csv(ice.dredge,paste0(sppData$Species[1],".ice.dredge.csv"))
+  ice.dredge
+  
+# HH Dredge
+
+# For low N obs, need to specify 5-term separately then model.sel them.
+  hh1 <- gam(AvgTrackDepth~s(AvgHH0.10,k=6),family=Gamma(link="log"),data=sppData)
+  hh2 <- gam(AvgTrackDepth~s(AvgHH0.20,k=6),family=Gamma(link="log"),data=sppData)
+  hh3 <- gam(AvgTrackDepth~s(AvgHH0.30,k=6),family=Gamma(link="log"),data=sppData)
+  hh4 <- gam(AvgTrackDepth~s(AvgHH0.40,k=6),family=Gamma(link="log"),data=sppData)
+  hh5 <- gam(AvgTrackDepth~s(AvgHH0.50,k=6),family=Gamma(link="log"),data=sppData)
+  sepRes <- model.sel(hh1,hh2,hh3,hh4,hh5)
+
+# now convert to data frame so we can add on an r.sq column.
+  sepResDF <- as.data.frame(sepRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+    arrange(`s(AvgHH0.10, k = 6)`,`s(AvgHH0.20, k = 6)`,`s(AvgHH0.30, k = 6)`,`s(AvgHH0.40, k = 6)`,`s(AvgHH0.50, k = 6)`)
+  sepResDF$rSq <- rbind(summary(hh1)$r.sq,summary(hh2)$r.sq,summary(hh3)$r.sq,summary(hh4)$r.sq,summary(hh5)$r.sq)
+  sepResDF$dev.expl <- rbind(summary(hh1)$dev.expl,summary(hh2)$dev.expl,summary(hh3)$dev.expl,summary(hh4)$dev.expl,summary(hh5)$dev.expl)
+  
+  write.csv(sepResDF,paste0(sppData$Species[1],".hh.dredge.csv"))
+sepResDF
+  
+# IceTotal Dredge
+
+# when there are many pits with no ice, there are very few unique covariate terms, which makes GAM throw an error
+#     For low N obs, need to specify 5-term separately then model.sel them.
+#     this assumes that the deeper layers have more options for ice thickness
+  ifelse(length(unique(sppData$TotalIce10))>5,{
+        
+# if there's enough combinations of covariate terms, we'll stick with 6 knots
+        it1 <- gam(AvgTrackDepth~s(TotalIce10,k=6),family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~s(TotalIce20,k=6),family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~s(TotalIce30,k=6),family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~s(TotalIce40,k=6),family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~s(TotalIce50,k=6),family=Gamma(link="log"),data=sppData)},
+        
+# but if not, we'll switch to a non-GAM GLM.
+        {it1 <- gam(AvgTrackDepth~TotalIce10,family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~TotalIce20,family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~TotalIce30,family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~TotalIce40,family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~TotalIce50,family=Gamma(link="log"),data=sppData)})
+        
+        
+        sepITRes <- model.sel(it1,it2,it3,it4,it5)
+# now convert to data frame so we can add on an r.sq column.
+        sepITResDF <- as.data.frame(sepITRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+          arrange(sepITRes[,2],sepITRes[,3],sepITRes[,4],sepITRes[,5],sepITRes[,6])
+        sepITResDF$rSq <- rbind(summary(it1)$r.sq,summary(it2)$r.sq,summary(it3)$r.sq,summary(it4)$r.sq,summary(it5)$r.sq)
+        sepITResDF$dev.expl <- rbind(summary(it1)$dev.expl,summary(it2)$dev.expl,summary(it3)$dev.expl,summary(it4)$dev.expl,summary(it5)$dev.expl)
+
+        
+ write.csv(sepITResDF,paste0(sppData$Species[1],".iceTotal.dredge.csv"))
+      sepITResDF
+
+        tuna.gam <- gam(AvgTrackDepth~s(AvgTuna,k=5), family=Gamma(link="log"),data=sppData)
+        summary(tuna.gam)$dev.expl
+
+```
+
+#### Next, deer.
+
+```{r Deer, echo=FALSE}
+datSp <- datAllNoNA[datAllNoNA$Species=="Deer",]
+
+  sppData <- datSp
+
+# Density Dredge
+
+# Set up a GAM and dredge it
+  dens.gam <- gam(AvgTrackDepth~s(AvgDens010,k=6)+s(AvgDens020,k=6)+s(AvgDens030,k=6),family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  dens.dredge <- dredge(dens.gam,m.lim=c(1,1))
+
+  dens.best1 <- get.models(dens.dredge,1)[[1]]
+  dens.best2 <- get.models(dens.dredge,2)[[1]]
+  dens.best3 <- get.models(dens.dredge,3)[[1]]
+  dens.dredge$rSq <- rbind(summary(dens.best1)$r.sq,
+                           summary(dens.best2)$r.sq,
+                           summary(dens.best3)$r.sq)
+
+  dens.dredge$dev <- rbind(summary(dens.best1)$dev.expl,
+                           summary(dens.best2)$dev.expl,
+                           summary(dens.best3)$dev.expl)
+
+  write.csv(dens.dredge,paste0(sppData$Species[1],".dens.dredge.csv"))
+  #dens.dredge
+
+# Ice Dredge
+# GAM doesn't work since there's only 0s and 1s, therefore there's only 2 values - so not enough for k
+#       instead, we'll just use GLM.
+  
+
+# set up a GAM and dredge it
+  ice.gam <- gam(AvgTrackDepth~IceTop10+IceTop20+IceTop30+IceTop40+IceTop50,family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  ice.dredge <- dredge(ice.gam,m.lim=c(1,1))
+  
+  ice.best1 <- get.models(ice.dredge,1)[[1]]
+  ice.best2 <- get.models(ice.dredge,2)[[1]]
+  ice.best3 <- get.models(ice.dredge,3)[[1]]
+  ice.best4 <- get.models(ice.dredge,4)[[1]]
+  ice.best5 <- get.models(ice.dredge,5)[[1]]
+  
+  ice.dredge$rSq <- rbind(summary(ice.best1)$r.sq,
+                          summary(ice.best2)$r.sq,
+                          summary(ice.best3)$r.sq,
+                          summary(ice.best4)$r.sq,
+                          summary(ice.best5)$r.sq)
+  
+  ice.dredge$dev <- rbind(summary(ice.best1)$dev.expl,
+                           summary(ice.best2)$dev.expl,
+                           summary(ice.best3)$dev.expl,
+                           summary(ice.best4)$dev.expl,
+                           summary(ice.best5)$dev.expl)
+  
+ write.csv(ice.dredge,paste0(sppData$Species[1],".ice.dredge.csv"))
+#  ice.dredge
+  
+# HH Dredge
+
+# For low N obs, need to specify 5-term separately then model.sel them.
+  hh1 <- gam(AvgTrackDepth~s(AvgHH0.10,k=6),family=Gamma(link="log"),data=sppData)
+  hh2 <- gam(AvgTrackDepth~s(AvgHH0.20,k=6),family=Gamma(link="log"),data=sppData)
+  hh3 <- gam(AvgTrackDepth~s(AvgHH0.30,k=6),family=Gamma(link="log"),data=sppData)
+  hh4 <- gam(AvgTrackDepth~s(AvgHH0.40,k=6),family=Gamma(link="log"),data=sppData)
+  hh5 <- gam(AvgTrackDepth~s(AvgHH0.50,k=6),family=Gamma(link="log"),data=sppData)
+  sepRes <- model.sel(hh1,hh2,hh3,hh4,hh5)
+
+# now convert to data frame so we can add on an r.sq column.
+  sepResDF <- as.data.frame(sepRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+    arrange(`s(AvgHH0.10, k = 6)`,`s(AvgHH0.20, k = 6)`,`s(AvgHH0.30, k = 6)`,`s(AvgHH0.40, k = 6)`,`s(AvgHH0.50, k = 6)`)
+  sepResDF$rSq <- rbind(summary(hh1)$r.sq,summary(hh2)$r.sq,summary(hh3)$r.sq,summary(hh4)$r.sq,summary(hh5)$r.sq)
+  sepResDF$dev.expl <- rbind(summary(hh1)$dev.expl,summary(hh2)$dev.expl,summary(hh3)$dev.expl,summary(hh4)$dev.expl,summary(hh5)$dev.expl)
+  
+  write.csv(sepResDF,paste0(sppData$Species[1],".hh.dredge.csv"))
+#sepResDF
+  
+# IceTotal Dredge
+
+# when there are many pits with no ice, there are very few unique covariate terms, which makes GAM throw an error
+#     For low N obs, need to specify 5-term separately then model.sel them.
+#     this assumes that the deeper layers have more options for ice thickness
+  ifelse(length(unique(sppData$TotalIce10))>5,{
+        
+# if there's enough combinations of covariate terms, we'll stick with 6 knots
+        it1 <- gam(AvgTrackDepth~s(TotalIce10,k=6),family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~s(TotalIce20,k=6),family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~s(TotalIce30,k=6),family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~s(TotalIce40,k=6),family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~s(TotalIce50,k=6),family=Gamma(link="log"),data=sppData)},
+        
+# but if not, we'll switch to a non-GAM GLM.
+        {it1 <- gam(AvgTrackDepth~TotalIce10,family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~TotalIce20,family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~TotalIce30,family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~TotalIce40,family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~TotalIce50,family=Gamma(link="log"),data=sppData)})
+        
+        
+        sepITRes <- model.sel(it1,it2,it3,it4,it5)
+# now convert to data frame so we can add on an r.sq column.
+        sepITResDF <- as.data.frame(sepITRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+          arrange(sepITRes[,2],sepITRes[,3],sepITRes[,4],sepITRes[,5],sepITRes[,6])
+        sepITResDF$rSq <- rbind(summary(it1)$r.sq,summary(it2)$r.sq,summary(it3)$r.sq,summary(it4)$r.sq,summary(it5)$r.sq)
+        sepITResDF$dev.expl <- rbind(summary(it1)$dev.expl,summary(it2)$dev.expl,summary(it3)$dev.expl,summary(it4)$dev.expl,summary(it5)$dev.expl)
+
+        
+ write.csv(sepITResDF,paste0(sppData$Species[1],".iceTotal.dredge.csv"))
+#      sepITResDF
+
+        tuna.gam <- gam(AvgTrackDepth~s(AvgTuna,k=5), family=Gamma(link="log"),data=sppData)
+        summary(tuna.gam)$dev.expl
+
+
+```
+
+#### Moose.
+
+```{r Moose, echo=FALSE}
+datSp <- datAllNoNA[datAllNoNA$Species=="Moose",]
+
+ sppData <- datSp
+
+# Density Dredge
+
+# Set up a GAM and dredge it
+  dens.gam <- gam(AvgTrackDepth~s(AvgDens010,k=6)+s(AvgDens020,k=6)+s(AvgDens030,k=6),family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  dens.dredge <- dredge(dens.gam,m.lim=c(1,1))
+
+  dens.best1 <- get.models(dens.dredge,1)[[1]]
+  dens.best2 <- get.models(dens.dredge,2)[[1]]
+  dens.best3 <- get.models(dens.dredge,3)[[1]]
+  dens.dredge$rSq <- rbind(summary(dens.best1)$r.sq,
+                           summary(dens.best2)$r.sq,
+                           summary(dens.best3)$r.sq)
+
+  dens.dredge$dev <- rbind(summary(dens.best1)$dev.expl,
+                           summary(dens.best2)$dev.expl,
+                           summary(dens.best3)$dev.expl)
+
+  write.csv(dens.dredge,paste0(sppData$Species[1],".NoJuvdens.dredge.csv"))
+  #dens.dredge
+
+# Ice Dredge
+# GAM doesn't work since there's only 0s and 1s, therefore there's only 2 values - so not enough for k
+#       instead, we'll just use GLM.
+  
+
+# set up a GAM and dredge it
+  ice.gam <- gam(AvgTrackDepth~IceTop10+IceTop20+IceTop30+IceTop40+IceTop50,family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  ice.dredge <- dredge(ice.gam,m.lim=c(1,1))
+  
+  ice.best1 <- get.models(ice.dredge,1)[[1]]
+  ice.best2 <- get.models(ice.dredge,2)[[1]]
+  ice.best3 <- get.models(ice.dredge,3)[[1]]
+  ice.best4 <- get.models(ice.dredge,4)[[1]]
+  ice.best5 <- get.models(ice.dredge,5)[[1]]
+  
+  ice.dredge$rSq <- rbind(summary(ice.best1)$r.sq,
+                          summary(ice.best2)$r.sq,
+                          summary(ice.best3)$r.sq,
+                          summary(ice.best4)$r.sq,
+                          summary(ice.best5)$r.sq)
+  
+  ice.dredge$dev <- rbind(summary(ice.best1)$dev.expl,
+                           summary(ice.best2)$dev.expl,
+                           summary(ice.best3)$dev.expl,
+                           summary(ice.best4)$dev.expl,
+                           summary(ice.best5)$dev.expl)
+  
+ write.csv(ice.dredge,paste0(sppData$Species[1],".ice.dredge.csv"))
+#  ice.dredge
+  
+# HH Dredge
+
+# For low N obs, need to specify 5-term separately then model.sel them.
+  hh1 <- gam(AvgTrackDepth~s(AvgHH0.10,k=6),family=Gamma(link="log"),data=sppData)
+  hh2 <- gam(AvgTrackDepth~s(AvgHH0.20,k=6),family=Gamma(link="log"),data=sppData)
+  hh3 <- gam(AvgTrackDepth~s(AvgHH0.30,k=6),family=Gamma(link="log"),data=sppData)
+  hh4 <- gam(AvgTrackDepth~s(AvgHH0.40,k=6),family=Gamma(link="log"),data=sppData)
+  hh5 <- gam(AvgTrackDepth~s(AvgHH0.50,k=6),family=Gamma(link="log"),data=sppData)
+  sepRes <- model.sel(hh1,hh2,hh3,hh4,hh5)
+
+# now convert to data frame so we can add on an r.sq column.
+  sepResDF <- as.data.frame(sepRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+    arrange(`s(AvgHH0.10, k = 6)`,`s(AvgHH0.20, k = 6)`,`s(AvgHH0.30, k = 6)`,`s(AvgHH0.40, k = 6)`,`s(AvgHH0.50, k = 6)`)
+  sepResDF$rSq <- rbind(summary(hh1)$r.sq,summary(hh2)$r.sq,summary(hh3)$r.sq,summary(hh4)$r.sq,summary(hh5)$r.sq)
+  sepResDF$dev.expl <- rbind(summary(hh1)$dev.expl,summary(hh2)$dev.expl,summary(hh3)$dev.expl,summary(hh4)$dev.expl,summary(hh5)$dev.expl)
+  
+  write.csv(sepResDF,paste0(sppData$Species[1],".hh.dredge.csv"))
+#sepResDF
+  
+# IceTotal Dredge
+
+# when there are many pits with no ice, there are very few unique covariate terms, which makes GAM throw an error
+#     For low N obs, need to specify 5-term separately then model.sel them.
+#     this assumes that the deeper layers have more options for ice thickness
+  ifelse(length(unique(sppData$TotalIce10))>5,{
+        
+# if there's enough combinations of covariate terms, we'll stick with 6 knots
+        it1 <- gam(AvgTrackDepth~s(TotalIce10,k=6),family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~s(TotalIce20,k=6),family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~s(TotalIce30,k=6),family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~s(TotalIce40,k=6),family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~s(TotalIce50,k=6),family=Gamma(link="log"),data=sppData)},
+        
+# but if not, we'll switch to a non-GAM GLM.
+        {it1 <- gam(AvgTrackDepth~TotalIce10,family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~TotalIce20,family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~TotalIce30,family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~TotalIce40,family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~TotalIce50,family=Gamma(link="log"),data=sppData)})
+        
+        
+        sepITRes <- model.sel(it1,it2,it3,it4,it5)
+# now convert to data frame so we can add on an r.sq column.
+        sepITResDF <- as.data.frame(sepITRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+          arrange(sepITRes[,2],sepITRes[,3],sepITRes[,4],sepITRes[,5],sepITRes[,6])
+        sepITResDF$rSq <- rbind(summary(it1)$r.sq,summary(it2)$r.sq,summary(it3)$r.sq,summary(it4)$r.sq,summary(it5)$r.sq)
+        sepITResDF$dev.expl <- rbind(summary(it1)$dev.expl,summary(it2)$dev.expl,summary(it3)$dev.expl,summary(it4)$dev.expl,summary(it5)$dev.expl)
+
+        
+write.csv(sepITResDF,paste0(sppData$Species[1],".iceTotal.dredge.csv"))
+#      sepITResDF
+
+        tuna.gam <- gam(AvgTrackDepth~s(AvgTuna,k=5), family=Gamma(link="log"),data=sppData)
+        summary(tuna.gam)$dev.expl
+
+
+```
+
+#### Juvenile moose.
+
+```{r MooseJuv, echo=FALSE}
+datSp <- datAllNoNA[datAllNoNA$Species=="Moose-Juv",]
+
+ sppData <- datSp
+
+# Density Dredge
+
+# Set up a GAM and dredge it
+  dens.gam <- gam(AvgTrackDepth~s(AvgDens010,k=6)+s(AvgDens020,k=6)+s(AvgDens030,k=6),family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  dens.dredge <- dredge(dens.gam,m.lim=c(1,1))
+
+  dens.best1 <- get.models(dens.dredge,1)[[1]]
+  dens.best2 <- get.models(dens.dredge,2)[[1]]
+  dens.best3 <- get.models(dens.dredge,3)[[1]]
+  dens.dredge$rSq <- rbind(summary(dens.best1)$r.sq,
+                           summary(dens.best2)$r.sq,
+                           summary(dens.best3)$r.sq)
+
+  dens.dredge$dev <- rbind(summary(dens.best1)$dev.expl,
+                           summary(dens.best2)$dev.expl,
+                           summary(dens.best3)$dev.expl)
+
+  write.csv(dens.dredge,paste0(sppData$Species[1],".dens.dredge.csv"))
+  #dens.dredge
+
+# Ice Dredge
+# GAM doesn't work since there's only 0s and 1s, therefore there's only 2 values - so not enough for k
+#       instead, we'll just use GLM.
+  
+
+# set up a GAM and dredge it
+  ice.gam <- gam(AvgTrackDepth~IceTop10+IceTop20+IceTop30+IceTop40+IceTop50,family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  ice.dredge <- dredge(ice.gam,m.lim=c(1,1))
+  
+  ice.best1 <- get.models(ice.dredge,1)[[1]]
+  ice.best2 <- get.models(ice.dredge,2)[[1]]
+  ice.best3 <- get.models(ice.dredge,3)[[1]]
+  ice.best4 <- get.models(ice.dredge,4)[[1]]
+  ice.best5 <- get.models(ice.dredge,5)[[1]]
+  
+  ice.dredge$rSq <- rbind(summary(ice.best1)$r.sq,
+                          summary(ice.best2)$r.sq,
+                          summary(ice.best3)$r.sq,
+                          summary(ice.best4)$r.sq,
+                          summary(ice.best5)$r.sq)
+  
+  ice.dredge$dev <- rbind(summary(ice.best1)$dev.expl,
+                           summary(ice.best2)$dev.expl,
+                           summary(ice.best3)$dev.expl,
+                           summary(ice.best4)$dev.expl,
+                           summary(ice.best5)$dev.expl)
+  
+ write.csv(ice.dredge,paste0(sppData$Species[1],".ice.dredge.csv"))
+#  ice.dredge
+  
+# HH Dredge
+
+# For low N obs, need to specify 5-term separately then model.sel them.
+  hh1 <- gam(AvgTrackDepth~s(AvgHH0.10,k=6),family=Gamma(link="log"),data=sppData)
+  hh2 <- gam(AvgTrackDepth~s(AvgHH0.20,k=6),family=Gamma(link="log"),data=sppData)
+  hh3 <- gam(AvgTrackDepth~s(AvgHH0.30,k=6),family=Gamma(link="log"),data=sppData)
+  hh4 <- gam(AvgTrackDepth~s(AvgHH0.40,k=6),family=Gamma(link="log"),data=sppData)
+  hh5 <- gam(AvgTrackDepth~s(AvgHH0.50,k=6),family=Gamma(link="log"),data=sppData)
+  sepRes <- model.sel(hh1,hh2,hh3,hh4,hh5)
+
+# now convert to data frame so we can add on an r.sq column.
+  sepResDF <- as.data.frame(sepRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+    arrange(`s(AvgHH0.10, k = 6)`,`s(AvgHH0.20, k = 6)`,`s(AvgHH0.30, k = 6)`,`s(AvgHH0.40, k = 6)`,`s(AvgHH0.50, k = 6)`)
+  sepResDF$rSq <- rbind(summary(hh1)$r.sq,summary(hh2)$r.sq,summary(hh3)$r.sq,summary(hh4)$r.sq,summary(hh5)$r.sq)
+  sepResDF$dev.expl <- rbind(summary(hh1)$dev.expl,summary(hh2)$dev.expl,summary(hh3)$dev.expl,summary(hh4)$dev.expl,summary(hh5)$dev.expl)
+  
+  write.csv(sepResDF,paste0(sppData$Species[1],".hh.dredge.csv"))
+#sepResDF
+  
+# IceTotal Dredge
+
+# when there are many pits with no ice, there are very few unique covariate terms, which makes GAM throw an error
+#     For low N obs, need to specify 5-term separately then model.sel them.
+#     this assumes that the deeper layers have more options for ice thickness
+  ifelse(length(unique(sppData$TotalIce10))>5,{
+        
+# if there's enough combinations of covariate terms, we'll stick with 6 knots
+        it1 <- gam(AvgTrackDepth~s(TotalIce10,k=6),family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~s(TotalIce20,k=6),family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~s(TotalIce30,k=6),family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~s(TotalIce40,k=6),family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~s(TotalIce50,k=6),family=Gamma(link="log"),data=sppData)},
+        
+# but if not, we'll switch to a non-GAM GLM.
+        {it1 <- gam(AvgTrackDepth~TotalIce10,family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~TotalIce20,family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~TotalIce30,family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~TotalIce40,family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~TotalIce50,family=Gamma(link="log"),data=sppData)})
+        
+        
+        sepITRes <- model.sel(it1,it2,it3,it4,it5)
+# now convert to data frame so we can add on an r.sq column.
+        sepITResDF <- as.data.frame(sepITRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+          arrange(sepITRes[,2],sepITRes[,3],sepITRes[,4],sepITRes[,5],sepITRes[,6])
+        sepITResDF$rSq <- rbind(summary(it1)$r.sq,summary(it2)$r.sq,summary(it3)$r.sq,summary(it4)$r.sq,summary(it5)$r.sq)
+        sepITResDF$dev.expl <- rbind(summary(it1)$dev.expl,summary(it2)$dev.expl,summary(it3)$dev.expl,summary(it4)$dev.expl,summary(it5)$dev.expl)
+
+        
+write.csv(sepITResDF,paste0(sppData$Species[1],".iceTotal.dredge.csv"))
+#      sepITResDF
+
+        tuna.gam <- gam(AvgTrackDepth~s(AvgTuna,k=5), family=Gamma(link="log"),data=sppData)
+        summary(tuna.gam)$dev.expl
+
+
+```
+#### And finally, wolves.
+
+```{r Wolf, echo=FALSE}
+datSp <- datAllNoNA[datAllNoNA$Species=="Wolf",]
+  sppData <- datSp
+
+# Density Dredge
+
+# Set up a GAM and dredge it
+  dens.gam <- gam(AvgTrackDepth~s(AvgDens010,k=6)+s(AvgDens020,k=6)+s(AvgDens030,k=6),family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  dens.dredge <- dredge(dens.gam,m.lim=c(1,1))
+
+  dens.best1 <- get.models(dens.dredge,1)[[1]]
+  dens.best2 <- get.models(dens.dredge,2)[[1]]
+  dens.best3 <- get.models(dens.dredge,3)[[1]]
+  dens.dredge$rSq <- rbind(summary(dens.best1)$r.sq,
+                           summary(dens.best2)$r.sq,
+                           summary(dens.best3)$r.sq)
+
+  dens.dredge$dev <- rbind(summary(dens.best1)$dev.expl,
+                           summary(dens.best2)$dev.expl,
+                           summary(dens.best3)$dev.expl)
+
+write.csv(dens.dredge,paste0(sppData$Species[1],".dens.dredge.csv"))
+  dens.dredge
+
+# Ice Dredge
+# GAM doesn't work since there's only 0s and 1s, therefore there's only 2 values - so not enough for k
+#       instead, we'll just use GLM.
+  
+
+# set up a GAM and dredge it
+  ice.gam <- gam(AvgTrackDepth~IceTop10+IceTop20+IceTop30+IceTop40+IceTop50,family=Gamma(link="log"),data=sppData)
+  #m.lim = limit number of terms in a model
+  ice.dredge <- dredge(ice.gam,m.lim=c(1,1))
+  
+  ice.best1 <- get.models(ice.dredge,1)[[1]]
+  ice.best2 <- get.models(ice.dredge,2)[[1]]
+  ice.best3 <- get.models(ice.dredge,3)[[1]]
+  ice.best4 <- get.models(ice.dredge,4)[[1]]
+  ice.best5 <- get.models(ice.dredge,5)[[1]]
+  
+  ice.dredge$rSq <- rbind(summary(ice.best1)$r.sq,
+                          summary(ice.best2)$r.sq,
+                          summary(ice.best3)$r.sq,
+                          summary(ice.best4)$r.sq,
+                          summary(ice.best5)$r.sq)
+  
+  ice.dredge$dev <- rbind(summary(ice.best1)$dev.expl,
+                           summary(ice.best2)$dev.expl,
+                           summary(ice.best3)$dev.expl,
+                           summary(ice.best4)$dev.expl,
+                           summary(ice.best5)$dev.expl)
+  
+ write.csv(ice.dredge,paste0(sppData$Species[1],".ice.dredge.csv"))
+  ice.dredge
+  
+# HH Dredge
+
+# For low N obs, need to specify 5-term separately then model.sel them.
+  hh1 <- gam(AvgTrackDepth~s(AvgHH0.10,k=6),family=Gamma(link="log"),data=sppData)
+  hh2 <- gam(AvgTrackDepth~s(AvgHH0.20,k=6),family=Gamma(link="log"),data=sppData)
+  hh3 <- gam(AvgTrackDepth~s(AvgHH0.30,k=6),family=Gamma(link="log"),data=sppData)
+  hh4 <- gam(AvgTrackDepth~s(AvgHH0.40,k=6),family=Gamma(link="log"),data=sppData)
+  hh5 <- gam(AvgTrackDepth~s(AvgHH0.50,k=6),family=Gamma(link="log"),data=sppData)
+  sepRes <- model.sel(hh1,hh2,hh3,hh4,hh5)
+
+# now convert to data frame so we can add on an r.sq column.
+  sepResDF <- as.data.frame(sepRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+    arrange(`s(AvgHH0.10, k = 6)`,`s(AvgHH0.20, k = 6)`,`s(AvgHH0.30, k = 6)`,`s(AvgHH0.40, k = 6)`,`s(AvgHH0.50, k = 6)`)
+  sepResDF$rSq <- rbind(summary(hh1)$r.sq,summary(hh2)$r.sq,summary(hh3)$r.sq,summary(hh4)$r.sq,summary(hh5)$r.sq)
+  sepResDF$dev.expl <- rbind(summary(hh1)$dev.expl,summary(hh2)$dev.expl,summary(hh3)$dev.expl,summary(hh4)$dev.expl,summary(hh5)$dev.expl)
+  
+  write.csv(sepResDF,paste0(sppData$Species[1],".hh.dredge.csv"))
+sepResDF
+  
+# IceTotal Dredge
+
+# when there are many pits with no ice, there are very few unique covariate terms, which makes GAM throw an error
+#     For low N obs, need to specify 5-term separately then model.sel them.
+#     this assumes that the deeper layers have more options for ice thickness
+  ifelse(length(unique(sppData$TotalIce10))>5,{
+        
+# if there's enough combinations of covariate terms, we'll stick with 6 knots
+        it1 <- gam(AvgTrackDepth~s(TotalIce10,k=6),family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~s(TotalIce20,k=6),family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~s(TotalIce30,k=6),family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~s(TotalIce40,k=6),family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~s(TotalIce50,k=6),family=Gamma(link="log"),data=sppData)},
+        
+# but if not, we'll switch to a non-GAM GLM.
+        {it1 <- gam(AvgTrackDepth~TotalIce10,family=Gamma(link="log"),data=sppData)
+        it2 <- gam(AvgTrackDepth~TotalIce20,family=Gamma(link="log"),data=sppData)
+        it3 <- gam(AvgTrackDepth~TotalIce30,family=Gamma(link="log"),data=sppData)
+        it4 <- gam(AvgTrackDepth~TotalIce40,family=Gamma(link="log"),data=sppData)
+        it5 <- gam(AvgTrackDepth~TotalIce50,family=Gamma(link="log"),data=sppData)})
+        
+        
+        sepITRes <- model.sel(it1,it2,it3,it4,it5)
+# now convert to data frame so we can add on an r.sq column.
+        sepITResDF <- as.data.frame(sepITRes) %>%
+# make sure it's in model-alphabetical order, rather than default of lowest AICc
+          arrange(sepITRes[,2],sepITRes[,3],sepITRes[,4],sepITRes[,5],sepITRes[,6])
+        sepITResDF$rSq <- rbind(summary(it1)$r.sq,summary(it2)$r.sq,summary(it3)$r.sq,summary(it4)$r.sq,summary(it5)$r.sq)
+        sepITResDF$dev.expl <- rbind(summary(it1)$dev.expl,summary(it2)$dev.expl,summary(it3)$dev.expl,summary(it4)$dev.expl,summary(it5)$dev.expl)
+
+        
+ write.csv(sepITResDF,paste0(sppData$Species[1],".iceTotal.dredge.csv"))
+      sepITResDF
+
+        tuna.gam <- gam(AvgTrackDepth~s(AvgTuna,k=5), family=Gamma(link="log"),data=sppData)
+        summary(tuna.gam)$dev.expl
+
+```
+
+
+### Part 2: Multi-species Snow Variable Selection
+
+Now that we've got a species-specific idea of what's important (results go into Table 1), let's look at all species combined (last column in Table 2).
+The last number is the tuna deviance explained.
+
+#### Density multi-species variable selection
+
+```{r Multi-species Regression, echo=FALSE}
+dat <- datAllNoNA
+dat$sppFact <- as.factor(dat$Species)
+
+#Density Dredge
+
+#Set up an GAM and dredge it
+dens.gam <- gam(AvgTrackDepth~s(AvgDens010,by=sppFact,k=6)+s(AvgDens020,by=sppFact,k=6)+
+                  s(AvgDens030,by=sppFact,k=6)+sppFact,family=Gamma(link="log"),data=dat)
+
+#m.lim = limit number of terms in a model
+dens.dredge <- dredge(dens.gam,fixed="sppFact",m.lim=c(2,2))
+d.best1 <- get.models(dens.dredge,1)[[1]]
+d.best2 <- get.models(dens.dredge,2)[[1]]
+d.best3 <- get.models(dens.dredge,3)[[1]]
+dens.dredge$r.sq <- rbind(summary(d.best1)$r.sq,summary(d.best2)$r.sq,summary(d.best3)$r.sq)
+dens.dredge$dev <- rbind(summary(d.best1)$dev.expl,summary(d.best2)$dev.expl,summary(d.best3)$dev.expl)
+dens.dredge
+write.csv(dens.dredge,"All.spp.dens.dredge.gam2.csv")
+```
+
+#### Ice Y/N multi-species variable selection
+
+```{r Multi-spp ice,echo=FALSE}
+#Ice Dredge
+#GAM doesn't work since there's only 0s and 1s, therefore there's only 2 values - so not enough for k
+#      instead, we'll just use GLM.
+#set up an LM and dredge it
+ice.glm <- gam(AvgTrackDepth~IceTop10:sppFact+IceTop20:sppFact+
+                 IceTop30:sppFact+IceTop40:sppFact+IceTop50:sppFact+sppFact,family=Gamma(link="log"),data=dat)
+#m.lim = limit number of terms in a model
+ice.dredge <- dredge(ice.glm,fixed="sppFact",m.lim=c(2,2))
+i.best1 <- get.models(ice.dredge,1)[[1]]
+i.best2 <- get.models(ice.dredge,2)[[1]]
+i.best3 <- get.models(ice.dredge,3)[[1]]
+i.best4 <- get.models(ice.dredge,4)[[1]]
+i.best5 <- get.models(ice.dredge,5)[[1]]
+
+
+ice.dredge$adj.r.sq <- rbind(summary(i.best1)$adj.r.squared,summary(i.best2)$adj.r.squared,
+                          summary(i.best3)$adj.r.squared,summary(i.best4)$adj.r.squared,
+                          summary(i.best5)$adj.r.squared)
+ice.dredge$dev <- rbind(summary(i.best1)$dev.expl,summary(i.best2)$dev.expl,
+                             summary(i.best3)$dev.expl,summary(i.best4)$dev.expl,
+                             summary(i.best5)$dev.expl)
+write.csv(ice.dredge,"All.spp.ice.dredge.lm.csv")
+ice.dredge
+```
+
+#### HH multi-species variable selection
+
+```{r multispp HH,echo=FALSE}
+#HH Dredge
+
+#set up a GLM and dredge it
+hh.gam <- gam(AvgTrackDepth~s(AvgHH0.10,by=sppFact,k=6)+s(AvgHH0.20,by=sppFact,k=6)+s(AvgHH0.30,by=sppFact,k=6)+
+                s(AvgHH0.40,by=sppFact,k=6)+s(AvgHH0.50,by=sppFact,k=6)+sppFact,
+              family=Gamma(link="log"),data=dat)
+
+#m.lim = limit number of terms in a model
+hh.dredge <- dredge(hh.gam,fixed="sppFact",m.lim=c(2,2))
+hh.best1 <- get.models(hh.dredge,1)[[1]]
+hh.best2 <- get.models(hh.dredge,2)[[1]]
+hh.best3 <- get.models(hh.dredge,3)[[1]]
+hh.best4 <- get.models(hh.dredge,4)[[1]]
+hh.best5 <- get.models(hh.dredge,5)[[1]]
+
+hh.dredge$R2 <- rbind(summary(hh.best1)$r.sq,summary(hh.best2)$r.sq,
+                          summary(hh.best3)$r.sq,summary(hh.best4)$r.sq,
+                          summary(hh.best5)$r.sq)
+
+hh.dredge$dev <- rbind(summary(hh.best1)$dev.expl,summary(hh.best2)$dev.expl,
+                      summary(hh.best3)$dev.expl,summary(hh.best4)$dev.expl,
+                      summary(hh.best5)$dev.expl)
+hh.dredge
+write.csv(hh.dredge,"All.spp.hh.dredge.gam.csv")
+```
+
+#### Total Ice (total cms of ice) multi-species variable selection
+
+```{r icetotal,echo=FALSE}
+#IceTotal Dredge
+
+#set up a GLM and dredge it
+icet.gam <- gam(AvgTrackDepth~s(TotalIce10,by=sppFact,k=6)+s(TotalIce20,by=sppFact,k=6)+s(TotalIce30,by=sppFact,k=6)+
+                 s(TotalIce40,by=sppFact,k=6)+s(TotalIce50,by=sppFact,k=6)+sppFact,family=Gamma(link="log"),data=dat)
+
+#m.lim = limit number of terms in a model
+icet.dredge <- dredge(icet.gam,fixed="sppFact",m.lim=c(2,2))
+it.best1 <- get.models(icet.dredge,1)[[1]]
+it.best2 <- get.models(icet.dredge,2)[[1]]
+it.best3 <- get.models(icet.dredge,3)[[1]]
+it.best4 <- get.models(icet.dredge,4)[[1]]
+it.best5 <- get.models(icet.dredge,5)[[1]]
+
+icet.dredge$R2 <- rbind(summary(it.best1)$r.sq,summary(it.best2)$r.sq,
+                          summary(it.best3)$r.sq,summary(it.best4)$r.sq,
+                          summary(it.best5)$r.sq)
+
+icet.dredge$dev <- rbind(summary(it.best1)$dev.expl,summary(it.best2)$dev.expl,
+                        summary(it.best3)$dev.expl,summary(it.best4)$dev.expl,
+                        summary(it.best5)$dev.expl)
+
+write.csv(icet.dredge,"All.spp.iceTotal.dredge.gam.csv")
+icet.dredge
+
+```
+
+#### Tuna multi-species variable selection
+
+```{r tuna multispp,echo=FALSE}
+tunaGam<- gam(AvgTrackDepth~s(AvgTuna,by=sppFact,k=6)+sppFact,family=Gamma(link="log"),data=dat)
+summary(tunaGam)$dev.expl
+
+```
+
+### Part 3: Regional Comparison
+
+Let's see if region makes a difference for species snow-sink depth relationship. We'll only run this for the three species that occur in both AK and WA: moose, wolves, and coyotes.
+
+```{r Regions, echo=FALSE}
+dat <- datAllNoNA
+dat$Region2 <- NA
+dat[dat$Region %in% c("MV","NE"),'Region2'] <- "WA"
+dat[dat$Region=="DENA",'Region2'] <- "AK"
+dat$Region2 <- as.factor(dat$Region2)
+
+mooS <- dat[dat$Species=="Moose",]
+wlfS <- dat[dat$Species=="Wolf",]
+coyS <- dat[dat$Species=="Coyote",]
+
+colsReg <- c("AK" = "#df72ff","WA" = "#38a700")
+
+moo.reg.compareNoReg <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+                       data=mooS)
+moo.reg.compareReg <- gam(AvgTrackDepth~s(AvgDens020,by=Region2,k=6)+Region2,family=Gamma(link="log"),
+                       data=mooS)
+moo.reg.compareSomeReg <- gam(AvgTrackDepth~s(AvgDens020,k=6)+Region2,family=Gamma(link="log"),
+                          data=mooS)
+#print("For moose x region:")
+model.sel(moo.reg.compareNoReg,moo.reg.compareReg,moo.reg.compareSomeReg)
+
+
+jpeg(file="MooRegional_v2.jpg",width=812, height=502)
+ggplot(dat=mooS,aes(y=AvgTrackDepth,x=AvgDens020))+
+  geom_point(aes(color=Region2),size=3)+
+  geom_smooth(aes(color=Region2),method="gam",formula=y~s(x,k=6,bs="tp"),
+              method.args = list(family = gaussian(link = 'log')),fill="gray",size=1.5)+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg/'~m^3*')'))+theme_bw()+
+  scale_color_manual(name = 'Region', 
+                     values = colsReg)+
+theme_bw()+
+    theme(legend.position=c(0.1,0.165),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=32),
+        axis.text = element_text(size=32),
+        legend.title=element_text(size=32),
+        legend.text=element_text(size=32))
+dev.off()
+
+# Wlf
+wlf.reg.compareNoReg <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+                            data=wlfS)
+wlf.reg.compareReg <- gam(AvgTrackDepth~s(AvgDens020,by=Region2,k=6)+Region2,family=Gamma(link="log"),
+                          data=wlfS)
+wlf.reg.compareSomeReg <- gam(AvgTrackDepth~s(AvgDens020,k=6)+Region2,family=Gamma(link="log"),
+                              data=wlfS)
+#print("For wolves x region:")
+model.sel(wlf.reg.compareNoReg,wlf.reg.compareReg,wlf.reg.compareSomeReg)
+
+
+jpeg(file="WlfRegional_v2.jpg",width=812, height=502)
+ggplot(dat=wlfS,aes(y=AvgTrackDepth,x=AvgDens020))+
+  geom_point(aes(color=Region2),size=3)+
+  geom_smooth(aes(color=Region2),method="gam",formula=y~s(x,k=6,bs="tp"),
+              method.args = list(family = gaussian(link = 'log')),fill="gray",size=1.5)+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg/'~m^3*')'))+theme_bw()+
+  scale_color_manual(name = 'Region', 
+                     values = colsReg)+
+  theme_bw()+
+  theme(legend.position=c(0.1,0.165),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=32),
+        axis.text = element_text(size=32),
+        legend.title=element_text(size=32),
+        legend.text=element_text(size=32))
+dev.off()
+
+
+# Coy
+coy.reg.compareNoReg <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+                            data=coyS)
+coy.reg.compareReg <- gam(AvgTrackDepth~s(AvgDens020,by=Region2,k=6)+Region2,family=Gamma(link="log"),
+                          data=coyS)
+coy.reg.compareSomeReg <- gam(AvgTrackDepth~s(AvgDens020,k=6)+Region2,family=Gamma(link="log"),
+                              data=coyS)
+#print("For coyotes x region:")
+model.sel(coy.reg.compareNoReg,coy.reg.compareReg,coy.reg.compareSomeReg)
+
+jpeg(file="CoyRegional_v2.jpg",width=812, height=502)
+ggplot(dat=coyS,aes(y=AvgTrackDepth,x=AvgDens020))+
+  geom_point(aes(color=Region2),size=3)+
+  geom_smooth(aes(color=Region2),method="gam",formula=y~s(x,k=6,bs="tp"),
+              method.args = list(family = gaussian(link = 'log')),fill="gray",size=1.5)+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg/'~m^3*')'))+theme_bw()+
+  scale_color_manual(name = 'Region', 
+                     values = colsReg)+
+  theme_bw()+
+  theme(legend.position=c(0.1,0.165),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=32),
+        axis.text = element_text(size=32),
+        legend.title=element_text(size=32),
+        legend.text=element_text(size=32))
+dev.off()
+```
+
+### Part 4: Determine Breakpoints
+
+Now that we've looked at regional differences and determined the best overall snow variable, let's define thresholds of support for all species.
+The outputs here will be aggregated into Table 3.
+
+
+#### Moose-Juvenile breakpoints
+
+For moose-juvenile, linear is best, and the following vector of 3 is the estimate, lower 95% CI, and upper 95% CI.
+
+```{r Breakpoints MooJuv,echo=FALSE}
+winnerMooJ <- lm(AvgTrackDepth~AvgDens020,data=dat[dat$Species=="Moose-Juv",])
+mooJSeg1 <- segmented(winnerMooJ,seg.Z=~AvgDens020,npsi=1)
+model.sel(winnerMooJ,mooJSeg1)
+win <- summary(mooJSeg1)
+
+winDF <- as.data.frame(NA)
+winDF$adjR <- win$adj.r.squared
+winDF$int <- win$coefficients[1]
+winDF$int95 <- win$coefficients[1,2]*1.96
+winDF$slope1 <- win$coefficients[2]
+winDF$slope195 <- win$coefficients[2,2]*1.96
+winDF$slope2 <- win$coefficients[3]+win$coefficients[2]
+winDF$slope295 <- win$coefficients[3,2]*1.96
+winDF$threshL <- mooJSeg1$psi[2]-mooJSeg1$psi[3]*1.96
+winDF$thresh <- mooJSeg1$psi[2]
+winDF$threshU <- mooJSeg1$psi[2]+mooJSeg1$psi[3]*1.96
+
+write.csv(winDF,"Moo-JuvSegLM.csv")
+```
+
+#### Wolf breakpoints
+
+For wolves, segmented wins. Here's the estimates:
+
+```{r Breakpoints Wlf, echo=FALSE}
+winnerWlf <- lm(AvgTrackDepth~AvgDens020,data=dat[dat$Species=="Wolf",])
+wlfSeg1 <- segmented(winnerWlf,seg.Z=~AvgDens020,npsi=1)
+model.sel(winnerWlf,wlfSeg1)
+win <- summary(wlfSeg1)
+
+winDF <- as.data.frame(NA)
+winDF$adjR <- win$adj.r.squared
+winDF$int <- win$coefficients[1]
+winDF$int95 <- win$coefficients[1,2]*1.96
+winDF$slope1 <- win$coefficients[2]
+winDF$slope195 <- win$coefficients[2,2]*1.96
+winDF$slope2 <- win$coefficients[3]+win$coefficients[2]
+winDF$slope295 <- win$coefficients[3,2]*1.96
+winDF$threshL <- wlfSeg1$psi[2]-wlfSeg1$psi[3]*1.96
+winDF$thresh <- wlfSeg1$psi[2]
+winDF$threshU <- wlfSeg1$psi[2]+wlfSeg1$psi[3]*1.96
+
+write.csv(winDF,"WolfSegLM.csv")
+```
+
+
+#### Coyote breakpoints
+
+For coyote, segmented works.
+
+```{r Breakpoints Coy, echo=FALSE}
+winnerCoy <- lm(AvgTrackDepth~AvgDens020,data=dat[dat$Species=="Coyote",])
+coySeg1 <- segmented(winnerCoy,seg.Z=~AvgDens020,npsi=1)
+model.sel(winnerCoy,coySeg1)
+summary(coySeg1)
+coySeg1$psi[2]-coySeg1$psi[3]*1.96
+coySeg1$psi[2]
+coySeg1$psi[2]+coySeg1$psi[3]*1.96
+summary(winnerCoy)
+
+win <- summary(coySeg1)
+
+winDF <- as.data.frame(NA)
+winDF$adjR <- win$adj.r.squared
+winDF$int <- win$coefficients[1]
+winDF$int95 <- win$coefficients[1,2]*1.96
+winDF$slope1 <- win$coefficients[2]
+winDF$slope195 <- win$coefficients[2,2]*1.96
+winDF$slope2 <- win$coefficients[3]+win$coefficients[2]
+winDF$slope295 <- win$coefficients[3,2]*1.96
+winDF$threshL <- coySeg1$psi[2]-coySeg1$psi[3]*1.96
+winDF$thresh <- coySeg1$psi[2]
+winDF$threshU <- coySeg1$psi[2]+coySeg1$psi[3]*1.96
+
+write.csv(winDF,"CoyoteSegLM.csv")
+```
+
+
+
+#### coug breakpoints
+
+For cougar, segmented works.
+
+```{r Breakpoints Cou, echo=FALSE}
+winnerCou <- lm(AvgTrackDepth~AvgDens020,data=dat[dat$Species=="Cougar",])
+couSeg1 <- segmented(winnerCou,seg.Z=~AvgDens020,npsi=1)
+model.sel(winnerCou,couSeg1)
+summary(couSeg1)
+summary(winnerCou)
+
+win <- summary(couSeg1)
+
+winDF <- as.data.frame(NA)
+winDF$adjR <- win$adj.r.squared
+winDF$int <- win$coefficients[1]
+winDF$int95 <- win$coefficients[1,2]*1.96
+winDF$slope1 <- win$coefficients[2]
+winDF$slope195 <- win$coefficients[2,2]*1.96
+winDF$slope2 <- win$coefficients[3]+win$coefficients[2]
+winDF$slope295 <- win$coefficients[3,2]*1.96
+winDF$threshL <- couSeg1$psi[2]-couSeg1$psi[3]*1.96
+winDF$thresh <- couSeg1$psi[2]
+winDF$threshU <- couSeg1$psi[2]+couSeg1$psi[3]*1.96
+
+write.csv(winDF,"CougarSegLM.csv")
+```
+
+#### Bobcat breakpoints
+
+For bobcats, segmented works.
+
+```{r Breakpoints Bob, echo=FALSE}
+winnerBob <- lm(AvgTrackDepth~AvgDens020,data=dat[dat$Species=="Bobcat",])
+bobSeg1 <- segmented(winnerBob,seg.Z=~AvgDens020,npsi=1)
+model.sel(winnerBob,bobSeg1)
+summary(bobSeg1)
+summary(winnerBob)
+bobSeg1$psi[2]-bobSeg1$psi[3]*1.96
+bobSeg1$psi[2]
+bobSeg1$psi[2]+bobSeg1$psi[3]*1.96
+
+win <- summary(bobSeg1)
+
+winDF <- as.data.frame(NA)
+winDF$adjR <- win$adj.r.squared
+winDF$int <- win$coefficients[1]
+winDF$int95 <- win$coefficients[1,2]*1.96
+winDF$slope1 <- win$coefficients[2]
+winDF$slope195 <- win$coefficients[2,2]*1.96
+winDF$slope2 <- win$coefficients[3]+win$coefficients[2]
+winDF$slope295 <- win$coefficients[3,2]*1.96
+winDF$threshL <- bobSeg1$psi[2]-bobSeg1$psi[3]*1.96
+winDF$thresh <- bobSeg1$psi[2]
+winDF$threshU <- bobSeg1$psi[2]+bobSeg1$psi[3]*1.96
+
+write.csv(winDF,"BobcatSegLM.csv")
+```
+
+#### Deer breakpoints
+
+For deer, segmented is OK.
+
+```{r Breakpoints Dee, echo=FALSE}
+winnerDee <- lm(AvgTrackDepth~AvgDens020,data=dat[dat$Species=="Deer",])
+deeSeg1 <- segmented(winnerDee,seg.Z=~AvgDens020,npsi=1)
+model.sel(winnerDee,deeSeg1)
+summary(deeSeg1)
+summary(winnerDee)
+deeSeg1$psi[2]-deeSeg1$psi[3]*1.96
+deeSeg1$psi[2]
+deeSeg1$psi[2]+deeSeg1$psi[3]*1.96
+
+win <- summary(deeSeg1)
+
+winDF <- as.data.frame(NA)
+winDF$adjR <- win$adj.r.squared
+winDF$int <- win$coefficients[1]
+winDF$int95 <- win$coefficients[1,2]*1.96
+winDF$slope1 <- win$coefficients[2]
+winDF$slope195 <- win$coefficients[2,2]*1.96
+winDF$slope2 <- win$coefficients[3]+win$coefficients[2]
+winDF$slope295 <- win$coefficients[3,2]*1.96
+winDF$threshL <- deeSeg1$psi[2]-deeSeg1$psi[3]*1.96
+winDF$thresh <- deeSeg1$psi[2]
+winDF$threshU <- deeSeg1$psi[2]+deeSeg1$psi[3]*1.96
+
+write.csv(winDF,"DeerSegLM.csv")
+```
+
+#### Caribou breakpoints
+
+For caribou, it's back to linear.
+
+```{r Breakpoints Bou, echo=FALSE}
+winnerBou <- lm(AvgTrackDepth~AvgDens020,data=dat[dat$Species=="Caribou",])
+bouSeg1 <- segmented(winnerBou,seg.Z=~AvgDens020,npsi=1)
+model.sel(winnerBou,bouSeg1)
+
+win <- summary(bouSeg1)
+
+winDF <- as.data.frame(NA)
+winDF$adjR <- win$adj.r.squared
+winDF$int <- win$coefficients[1]
+winDF$int95 <- win$coefficients[1,2]*1.96
+winDF$slope1 <- win$coefficients[2]
+winDF$slope195 <- win$coefficients[2,2]*1.96
+winDF$slope2 <- win$coefficients[3]+win$coefficients[2]
+winDF$slope295 <- win$coefficients[3,2]*1.96
+winDF$threshL <- bouSeg1$psi[2]-bouSeg1$psi[3]*1.96
+winDF$thresh <- bouSeg1$psi[2]
+winDF$threshU <- bouSeg1$psi[2]+bouSeg1$psi[3]*1.96
+
+
+write.csv(winDF,"BouSegLM.csv")
+```
+
+
+
+#### Moose breakpoints
+
+For moose, linear is best, and the following vector of 3 is the estimate, lower 95% CI, and upper 95% CI.
+
+```{r Breakpoints Moo,echo=FALSE}
+winnerMoo <- lm(AvgTrackDepth~AvgDens020,data=dat[dat$Species=="Moose",])
+mooSeg1 <- segmented(winnerMoo,seg.Z=~AvgDens020,npsi=1)
+model.sel(winnerMoo,mooSeg1)
+win <- summary(winnerMoo)
+
+# using 11.4 because that is the average of other breakpoints
+xIntConfInt <- function(spplm){
+  xInt <- -spplm$coefficients[1]/spplm$coefficients[2]
+  xIntRange <- as.data.frame(seq(from=c(xInt-150),to=c(xInt+150),length.out=600))
+  names(xIntRange) <- c("AvgDens020")
+  nearIntPred <- as.data.frame(cbind(predict(spplm,newdata=xIntRange,interval="confidence"),xIntRange))
+  xBar <- nearIntPred[which.min(abs(11.4-nearIntPred$fit)),"AvgDens020"]
+  lwrXBar <- nearIntPred[which.min(abs(11.4-nearIntPred$lwr)),"AvgDens020"]
+  uprXBar <- nearIntPred[which.min(abs(11.4-nearIntPred$upr)),"AvgDens020"]
+  return(c(xBar,lwrXBar,uprXBar))
+}
+
+confIntRes <- c(0,0,0)
+confIntRes <- xIntConfInt(winnerMoo)
+confIntRes
+winDF <- as.data.frame(NA)
+winDF$adjR <- win$adj.r.squared
+winDF$int <- win$coefficients[1]
+winDF$int95 <- win$coefficients[1,2]*1.96
+winDF$slope <- win$coefficients[2]
+winDF$slope95 <- win$coefficients[2,2]*1.96
+winDF$threshL <- confIntRes[2]
+winDF$thresh <- confIntRes[1]
+winDF$threshU <- confIntRes[3]
+
+write.csv(winDF,"MooseSegLM.csv")
+```
+
+
+### Part 5: Compare GAM with LM/Segmented
+
+This will take some behind-the-scenes calculating to prepare predictions for GAM and the winning (segmented or linear) model. Behind-the-scenes code written here, with figures to follow.
+
+```{r GAM vs LM,echo=FALSE}
+
+Bou.seg.win <- segmented(winnerBou,seg.Z=~AvgDens020,npsi=1)
+Dee.seg.win <- segmented(winnerDee,seg.Z=~AvgDens020,npsi=1)
+Moo.seg.win <- winnerMoo
+MooJ.seg.win <- segmented(winnerMooJ,seg.Z=~AvgDens020,npsi=1)
+Cou.seg.win <- segmented(winnerCou,seg.Z=~AvgDens020,npsi=1)
+Bob.seg.win <- segmented(winnerBob,seg.Z=~AvgDens020,npsi=1)
+Coy.seg.win <- segmented(winnerCoy,seg.Z=~AvgDens020,npsi=1)
+Wlf.seg.win <- segmented(winnerWlf,seg.Z=~AvgDens020,npsi=1)
+
+get.preds <- function(inSpp){
+  datt <- dat[dat$Species==inSpp,]
+  spMin <- min(datt$AvgDens020)
+  spMax <- max(datt$AvgDens020)
+  densRange <- seq(from=spMin,to=spMax,length.out=700)
+  densRange <- as.data.frame(densRange)
+  names(densRange) <- c("AvgDens020")
+  return(densRange)
+}
+
+bobR <- get.preds("Bobcat")
+coyR <- get.preds("Coyote")
+couR <- get.preds("Cougar")
+bouR <- get.preds("Caribou")
+deeR <- get.preds("Deer")
+mooR <- get.preds("Moose")
+mooJR <- get.preds("Moose-Juv")
+wlfR <- get.preds("Wolf")
+
+Bou.pred <- predict.segmented(Bou.seg.win,newdata=bouR,interval = "confidence") %>%
+  bind_cols(bouR)
+Bou.pred[Bou.pred < 0] <- 0
+Dee.pred <- predict.segmented(Dee.seg.win,newdata=deeR,interval = "confidence") %>%
+  bind_cols(deeR)
+Dee.pred[Dee.pred < 0] <- 0
+Moo.pred <- predict(Moo.seg.win,newdata=mooR,interval = "confidence") %>%
+  bind_cols(mooR)
+Moo.pred[Moo.pred < 0] <- 0
+MooJ.pred <- predict.segmented(MooJ.seg.win,newdata=mooJR,interval = "confidence") %>%
+  bind_cols(mooJR)
+MooJ.pred[MooJ.pred < 0] <- 0
+Bob.pred <- predict.segmented(Bob.seg.win,newdata=bobR,interval = "confidence") %>%
+  bind_cols(bobR)
+Bob.pred[Bob.pred < 0] <- 0
+Coy.pred <- predict.segmented(Coy.seg.win,newdata=coyR,interval = "confidence") %>%
+  bind_cols(coyR)
+Coy.pred[Coy.pred < 0] <- 0
+Cou.pred <- predict.segmented(Cou.seg.win,newdata=couR,interval = "confidence") %>%
+  bind_cols(couR)
+Cou.pred[Cou.pred < 0] <- 0
+Wlf.pred <- predict.segmented(Wlf.seg.win,newdata=wlfR,interval = "confidence") %>%
+  bind_cols(wlfR)
+Wlf.pred[Wlf.pred < 0] <- 0
+
+
+bobGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Bobcat",])
+bouGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Caribou",])
+couGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Cougar",])
+mooGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Moose",])
+mooJGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Moose-Juv",])
+deeGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Deer",])
+coyGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Coyote",])
+wlfGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Wolf",])
+
+
+Bou.gam.pred <- predict.gam(bouGam,newdata=bouR,se.fit=TRUE)
+Bou.gam.pred <- cbind(Bou.gam.pred,bouR)
+Dee.gam.pred <- predict.gam(deeGam,newdata=deeR,se.fit=TRUE)
+Dee.gam.pred <- cbind(Dee.gam.pred,deeR)
+Moo.gam.pred <- predict.gam(mooGam,newdata=mooR,se.fit=TRUE)
+Moo.gam.pred <- cbind(Moo.gam.pred,mooR)
+MooJ.gam.pred <- predict.gam(mooJGam,newdata=mooJR,se.fit=TRUE)
+MooJ.gam.pred <- cbind(MooJ.gam.pred,mooJR)
+Bob.gam.pred <- predict(bobGam,newdata=bobR,se.fit=TRUE)
+Bob.gam.pred <- cbind(Bob.gam.pred,bobR)
+Coy.gam.pred <- predict.gam(coyGam,newdata=coyR,se.fit=TRUE)
+Coy.gam.pred <- cbind(Coy.gam.pred,coyR)
+Cou.gam.pred <- predict.gam(couGam,newdata=couR,se.fit=TRUE)
+Cou.gam.pred <- cbind(Cou.gam.pred,couR)
+Wlf.gam.pred <- predict.gam(wlfGam,newdata=wlfR,se.fit=TRUE)
+Wlf.gam.pred <- cbind(Wlf.gam.pred,wlfR)
+
+
+Wlf.models <- as.data.frame(cbind(wlfR,exp(Wlf.gam.pred$fit),rep("tGAM",nrow(wlfR))))
+names(Wlf.models) <- c("AvgDens020","preds","model")
+Wlf.seg.models <- as.data.frame(cbind(wlfR,Wlf.pred$fit,rep("Segmented",nrow(wlfR))))
+names(Wlf.seg.models) <- c("AvgDens020","preds","model")
+Wlf.both <- rbind(Wlf.models,Wlf.seg.models)
+
+Coy.models <- as.data.frame(cbind(coyR,exp(Coy.gam.pred$fit),rep("tGAM",nrow(coyR))))
+names(Coy.models) <- c("AvgDens020","preds","model")
+Coy.seg.models <- as.data.frame(cbind(coyR,Coy.pred$fit,rep("Segmented",nrow(coyR))))
+names(Coy.seg.models) <- c("AvgDens020","preds","model")
+Coy.both <- rbind(Coy.models,Coy.seg.models)
+
+Cou.models <- as.data.frame(cbind(couR,exp(Cou.gam.pred$fit),rep("tGAM",nrow(couR))))
+names(Cou.models) <- c("AvgDens020","preds","model")
+Cou.seg.models <- as.data.frame(cbind(couR,Cou.pred$fit,rep("Segmented",nrow(couR))))
+names(Cou.seg.models) <- c("AvgDens020","preds","model")
+Cou.both <- rbind(Cou.models,Cou.seg.models)
+
+
+Bob.models <- as.data.frame(cbind(bobR,exp(Bob.gam.pred$fit),rep("tGAM",nrow(bobR))))
+names(Bob.models) <- c("AvgDens020","preds","model")
+Bob.seg.models <- as.data.frame(cbind(bobR,Bob.pred$fit,rep("Segmented",nrow(bobR))))
+names(Bob.seg.models) <- c("AvgDens020","preds","model")
+Bob.both <- rbind(Bob.models,Bob.seg.models)
+
+Dee.models <- as.data.frame(cbind(deeR,exp(Dee.gam.pred$fit),rep("tGAM",nrow(deeR))))
+names(Dee.models) <- c("AvgDens020","preds","model")
+Dee.seg.models <- as.data.frame(cbind(deeR,Dee.pred$fit,rep("Segmented",nrow(deeR))))
+names(Dee.seg.models) <- c("AvgDens020","preds","model")
+Dee.both <- rbind(Dee.models,Dee.seg.models)
+
+Moo.models <- as.data.frame(cbind(mooR,exp(Moo.gam.pred$fit),rep("tGAM",nrow(mooR))))
+names(Moo.models) <- c("AvgDens020","preds","model")
+Moo.seg.models <- as.data.frame(cbind(mooR,Moo.pred$fit,rep("Segmented",nrow(mooR))))
+names(Moo.seg.models) <- c("AvgDens020","preds","model")
+Moo.both <- rbind(Moo.models,Moo.seg.models)
+
+MooJ.models <- as.data.frame(cbind(mooJR,exp(MooJ.gam.pred$fit),rep("tGAM",nrow(mooJR))))
+names(MooJ.models) <- c("AvgDens020","preds","model")
+MooJ.seg.models <- as.data.frame(cbind(mooJR,MooJ.pred$fit,rep("Segmented",nrow(mooJR))))
+names(MooJ.seg.models) <- c("AvgDens020","preds","model")
+MooJ.both <- rbind(MooJ.models,MooJ.seg.models)
+
+
+
+Bou.models <- as.data.frame(cbind(bouR,exp(Bou.gam.pred$fit),rep("tGAM",nrow(bouR))))
+names(Bou.models) <- c("AvgDens020","preds","model")
+Bou.seg.models <- as.data.frame(cbind(bouR,Bou.pred$fit,rep("Segmented",nrow(bouR))))
+names(Bou.seg.models) <- c("AvgDens020","preds","model")
+Bou.both <- rbind(Bou.models,Bou.seg.models)
+
+```
+
+
+#### Predator GAM vs. Segmented Figs
+
+See below, switch out each time with predator color, data (.both, point, ribbon).
+
+```{r wlfGAMSeg,echo=False}
+palette1 <- brewer.pal(n = 11, name = "Spectral")
+cols1 <- c("Wolf" = palette1[1],"Coyote" = palette1[2],
+           "Cougar" = palette1[4],"Bobcat" = "#D8B57D",
+           "Caribou"=palette1[9], "Deer" = palette1[10],"Moose" = palette1[11],
+           "Moose-Juv"="#afa6d4")
+
+GAMSegplot <- ggplot(data=Moo.both)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth),color="#4a3e80",size=3,data=Moo)+
+    geom_ribbon(aes(x=AvgDens020,ymin = lwr, ymax = upr),fill= "#4a3e80", 
+              alpha=0.2,data=Moo.pred)+
+  geom_line(aes(x=AvgDens020,y=preds,color=model,linetype=model),size=2)+
+  coord_cartesian(xlim=c(25,525),ylim=c(0,80))+ 
+  scale_colour_manual(values = c("Segmented" = "#4a3e80","tGAM" = "black"))+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(legend.position=("none"),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=36),
+        axis.text = element_text(size=36),
+        legend.title=element_text(size=36),
+        legend.text=element_text(size=36))
+jpeg(file="MooGAMSeg_v2.jpg",width=812, height=502)
+GAMSegplot
+dev.off()
+
+GAMSegplot <- ggplot(data=MooJ.both)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth),color="#7a6cb8",size=3,data=MooJuv)+
+    geom_ribbon(aes(x=AvgDens020,ymin = lwr, ymax = upr),fill= "#7a6cb8", 
+              alpha=0.2,data=MooJ.pred)+
+  geom_line(aes(x=AvgDens020,y=preds,color=model,linetype=model),size=2)+
+  coord_cartesian(xlim=c(25,525),ylim=c(0,80))+ 
+  scale_colour_manual(values = c("Segmented" = "#7a6cb8","tGAM" = "black"))+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(legend.position=("none"),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=36),
+        axis.text = element_text(size=36),
+        legend.title=element_text(size=36),
+        legend.text=element_text(size=36))
+jpeg(file="MooJGAMSeg_v2.jpg",width=812, height=502)
+GAMSegplot
+dev.off()
+
+GAMSegplot <- ggplot(data=Bou.both)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth),color=palette1[9],size=4,data=Bou)+
+  geom_ribbon(aes(x=AvgDens020,ymin = lwr, ymax = upr),fill= palette1[9], 
+              alpha=0.2,data=Bou.pred)+
+  geom_line(aes(x=AvgDens020,y=preds,color=model,linetype=model),size=3)+
+
+  coord_cartesian(xlim=c(100,500),ylim=c(0,80))+ 
+  scale_colour_manual(values = c("Segmented" = palette1[9],"tGAM" = "black"))+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(legend.position=("none"),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=36),
+        axis.text = element_text(size=36),
+        legend.title=element_text(size=36),
+        legend.text=element_text(size=36))
+
+jpeg(file="BouGAMSeg_v2.jpg",width=812, height=502)
+GAMSegplot
+dev.off()
+
+GAMSegplot <- ggplot(data=Dee.both)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth),color=palette1[10],size=4,data=Dee)+
+  geom_ribbon(aes(x=AvgDens020,ymin = lwr, ymax = upr),fill= palette1[10], 
+              alpha=0.2,data=Dee.pred)+
+  geom_line(aes(x=AvgDens020,y=preds,color=model,linetype=model),size=3)+
+
+  coord_cartesian(xlim=c(100,500),ylim=c(0,80))+ 
+  scale_colour_manual(values = c("Segmented" = palette1[10],"tGAM" = "black"))+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(legend.position=("none"),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=36),
+        axis.text = element_text(size=36),
+        legend.title=element_text(size=36),
+        legend.text=element_text(size=36))
+
+jpeg(file="DeeGAMSeg_v2.jpg",width=812, height=502)
+GAMSegplot
+dev.off()
+
+GAMSegplot <- ggplot(data=Cou.both)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth),color=palette1[4],size=4,data=Cou)+
+  geom_ribbon(aes(x=AvgDens020,ymin = lwr, ymax = upr),fill= palette1[4], 
+              alpha=0.2,data=Cou.pred)+
+  geom_line(aes(x=AvgDens020,y=preds,color=model,linetype=model),size=3)+
+
+  coord_cartesian(xlim=c(100,500),ylim=c(0,40))+ 
+  scale_colour_manual(values = c("Segmented" = palette1[4],"tGAM" = "black"))+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(legend.position=("none"),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=36),
+        axis.text = element_text(size=36),
+        legend.title=element_text(size=36),
+        legend.text=element_text(size=36))
+
+jpeg(file="CouGAMSeg_v2.jpg",width=812, height=502)
+GAMSegplot
+dev.off()
+
+GAMSegplot <- ggplot(data=Coy.both)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth),color=palette1[2],size=4,data=Coy)+
+  geom_ribbon(aes(x=AvgDens020,ymin = lwr, ymax = upr),fill= palette1[2], 
+              alpha=0.2,data=Coy.pred)+
+  geom_line(aes(x=AvgDens020,y=preds,color=model,linetype=model),size=3)+
+
+  coord_cartesian(xlim=c(100,500),ylim=c(0,40))+ 
+  scale_colour_manual(values = c("Segmented" = palette1[2],"tGAM" = "black"))+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(legend.position=("none"),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=36),
+        axis.text = element_text(size=36),
+        legend.title=element_text(size=36),
+        legend.text=element_text(size=36))
+
+jpeg(file="CoyGAMSeg_v2.jpg",width=812, height=502)
+GAMSegplot
+dev.off()
+
+
+GAMSegplot <- ggplot(data=Cou.both)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth),color=palette1[4],size=4,data=Cou)+
+  geom_ribbon(aes(x=AvgDens020,ymin = lwr, ymax = upr),fill= palette1[4], 
+              alpha=0.2,data=Cou.pred)+
+  geom_line(aes(x=AvgDens020,y=preds,color=model,linetype=model),size=3)+
+
+  coord_cartesian(xlim=c(100,500),ylim=c(0,40))+ 
+  scale_colour_manual(values = c("Segmented" = palette1[4],"tGAM" = "black"))+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(legend.position=("none"),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=36),
+        axis.text = element_text(size=36),
+        legend.title=element_text(size=36),
+        legend.text=element_text(size=36))
+
+jpeg(file="CouGAMSeg_v2.jpg",width=812, height=502)
+GAMSegplot
+dev.off()
+
+GAMSegplot <- ggplot(data=Wlf.both)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth),color=palette1[1],size=4,data=Wlf)+
+  geom_ribbon(aes(x=AvgDens020,ymin = lwr, ymax = upr),fill= palette1[1], 
+              alpha=0.2,data=Wlf.pred)+
+  geom_line(aes(x=AvgDens020,y=preds,color=model,linetype=model),size=3)+
+
+  coord_cartesian(xlim=c(100,500),ylim=c(0,40))+ 
+  scale_colour_manual(values = c("Segmented" = palette1[1],"tGAM" = "black"))+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(legend.position=("none"),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=36),
+        axis.text = element_text(size=36),
+        legend.title=element_text(size=36),
+        legend.text=element_text(size=36))
+
+jpeg(file="WlfGAMSeg_v2.jpg",width=812, height=502)
+GAMSegplot
+dev.off()
+
+
+GAMSegplot <- ggplot(data=Bob.both)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth),color="#D8B57D",size=4,data=Bob)+
+  geom_ribbon(aes(x=AvgDens020,ymin = lwr, ymax = upr),fill= "#D8B57D", 
+              alpha=0.2,data=Bob.pred)+
+  geom_line(aes(x=AvgDens020,y=preds,color=model,linetype=model),size=3)+
+
+  coord_cartesian(xlim=c(100,500),ylim=c(0,40))+ 
+  scale_colour_manual(values = c("Segmented" = "#D8B57D","tGAM" = "black"))+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(legend.position=("none"),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=36),
+        axis.text = element_text(size=36),
+        legend.title=element_text(size=36),
+        legend.text=element_text(size=36))
+
+jpeg(file="BobGAMSeg_v2.jpg",width=812, height=502)
+GAMSegplot
+dev.off()
+```
+
+
+#### Prey GAM vs. Segmented
+
+```{r CoyGAMSeg,echo=False}
+preyGAMplot <- ggplot(data=Moo.both)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth),color=palette1[11],size=3,data=Moo)+
+    geom_ribbon(aes(x=AvgDens020,ymin = lwr, ymax = upr),fill= palette1[11], 
+              alpha=0.2,data=Moo.pred)+
+  geom_line(aes(x=AvgDens020,y=preds,color=model,linetype=model),size=2)+
+
+  coord_cartesian(xlim=c(25,525),ylim=c(0,80))+ 
+  scale_colour_manual(values = c("Segmented" = palette1[11],"tGAM" = "black"))+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(legend.position=("none"),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=24),
+        axis.text = element_text(size=24),
+        legend.title=element_text(size=24),
+        legend.text=element_text(size=24))
+preyGAMplot
+```
+
+
+### GAM vs. segmented legends
+
+```{r CougGAMSeg,echo=False}
+
+cols1 <- c("Bobcat" = "#D8B57D","Cougar" = palette1[4],"Coyote" = palette1[2],"Wolf" = palette1[1],
+           "Caribou"=palette1[9], "Deer" = palette1[10],"Juv Moose" = "#7a6cb8","Moose" = "#4a3e80")
+
+
+legend1plot <- ggplot(data=Moo.both)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth),size=3,data=Moo)+
+  geom_ribbon(aes(x=AvgDens020,ymin = lwr, ymax = upr), 
+              alpha=0.2,data=Moo.pred)+
+  geom_line(aes(x=AvgDens020,y=preds,linetype=model,color=model),size=2)+
+  
+  coord_cartesian(xlim=c(25,525),ylim=c(0,80))+ 
+  scale_colour_manual(values = c("Segmented" = cols1,"tGAM" = "black"))+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=24),
+        axis.text = element_text(size=24),
+        legend.title=element_text(size=24),
+        legend.text=element_text(size=24))+
+  scale_size(range=c(1, 2), guide=FALSE)
+
+jpeg(file="LineLegendGAMSeg_v2.jpg",width=812, height=502)
+legend1plot+ theme(legend.key.width = unit(5,"cm"))
+dev.off()
+
+
+legend2plot <- ggplot(data=dat)+
+  geom_point(aes(x=AvgDens020,y=AvgTrackDepth,color=sppFact),size=3)+
+  scale_colour_manual(values = cols1)+
+  scale_linetype_manual(values = c("Segmented" = "solid", "tGAM" = "dashed"))+
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  theme(
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=24),
+        axis.text = element_text(size=24),
+        legend.title=element_text(size=24),
+        legend.text=element_text(size=24))
+jpeg(file="PointLegendGAMSeg_v2.jpg",width=812, height=502)
+legend2plot
+dev.off()
+
+
+
+```
+
+
+
+### Part 6: Peak Danger Plots
+
+We'll plot danger zones using predator-prey pairs.
+
+```{r peak danger,echo=false}
+
+get.preds <- function(inSpp){
+  datt <- dat[dat$Species==inSpp,]
+  spMin <- min(datt$AvgDens020)
+  spMax <- max(datt$AvgDens020)
+  densRange <- seq(from=round(spMin),to=round(spMax),by=0.5)
+  densRange <- as.data.frame(densRange)
+  names(densRange) <- c("AvgDens020")
+  return(densRange)
+}
+
+
+bobR <- get.preds("Bobcat")
+coyR <- get.preds("Coyote")
+couR <- get.preds("Cougar")
+bouR <- get.preds("Caribou")
+deeR <- get.preds("Deer")
+mooR <- get.preds("Moose")
+mooJR <- get.preds("Moose-Juv")
+wlfR <- get.preds("Wolf")
+
+bobGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Bobcat",])
+bouGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Caribou",])
+mooGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Moose",])
+mooJGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Moose-Juv",])
+deeGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Deer",])
+couGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Cougar",])
+coyGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Coyote",])
+wlfGam <- gam(AvgTrackDepth~s(AvgDens020,k=6),family=Gamma(link="log"),
+              data=dat[dat$Species=="Wolf",])
+
+
+Bou.gam.pred <- predict.gam(bouGam,newdata=bouR,se.fit=TRUE)
+Dee.gam.pred <- predict.gam(deeGam,newdata=deeR,se.fit=TRUE)
+Cou.gam.pred <- predict.gam(couGam,newdata=couR,se.fit=TRUE)
+Moo.gam.pred <- predict.gam(mooGam,newdata=mooR,se.fit=TRUE)
+MooJ.gam.pred <- predict.gam(mooJGam,newdata=mooJR,se.fit=TRUE)
+Bob.gam.pred <- predict.gam(bobGam,newdata=bobR,se.fit=TRUE)
+Coy.gam.pred <- predict.gam(coyGam,newdata=coyR,se.fit=TRUE)
+Wlf.gam.pred <- predict.gam(wlfGam,newdata=wlfR,se.fit=TRUE)
+
+
+palette1 <- brewer.pal(n = 11, name = "Spectral")
+
+cols1 <- c("Bobcat" = "#D8B57D","Cougar" = palette1[4],"Coyote" = palette1[2],"Wolf" = palette1[1],
+           "Caribou"=palette1[9], "Deer" = palette1[10],"Juv Moose" = "#7a6cb8","Moose" = "#4a3e80")
+
+Wlf.models <- as.data.frame(cbind(wlfR,exp(Wlf.gam.pred$fit)/65.7,
+                                  exp(c(Wlf.gam.pred$fit-1.96*Wlf.gam.pred$se.fit))/65.7,
+                                  exp(c(Wlf.gam.pred$fit+1.96*Wlf.gam.pred$se.fit))/65.7))
+names(Wlf.models) <- c("AvgDens020","wlfpreds","wlfymin","wlfymax")
+
+Moo.models <- as.data.frame(cbind(mooR,exp(Moo.gam.pred$fit)/123.8,
+                                  exp(c(Moo.gam.pred$fit-1.96*Moo.gam.pred$se.fit))/123.8,
+                                  exp(c(Moo.gam.pred$fit+1.96*Moo.gam.pred$se.fit))/123.8))
+names(Moo.models) <- c("AvgDens020","moopreds","mooymin","mooymax")
+
+MooJ.models <- as.data.frame(cbind(mooJR,exp(MooJ.gam.pred$fit)/123.8,
+                                  exp(c(MooJ.gam.pred$fit-1.96*MooJ.gam.pred$se.fit))/123.8,
+                                  exp(c(MooJ.gam.pred$fit+1.96*MooJ.gam.pred$se.fit))/123.8))
+names(MooJ.models) <- c("AvgDens020","moojpreds","mooymin","mooymax")
+
+
+
+Dee.models <- as.data.frame(cbind(deeR,exp(Dee.gam.pred$fit)/79.55,
+                                  exp(c(Dee.gam.pred$fit-1.96*Dee.gam.pred$se.fit))/79.55,
+                                  exp(c(Dee.gam.pred$fit+1.96*Dee.gam.pred$se.fit))/79.55))
+names(Dee.models) <- c("AvgDens020","deepreds","deeymin","deeymax")
+
+
+Bou.models <- as.data.frame(cbind(bouR,exp(Bou.gam.pred$fit)/101.2,
+                                  exp(c(Bou.gam.pred$fit-1.96*Bou.gam.pred$se.fit))/101.2,
+                                  exp(c(Bou.gam.pred$fit+1.96*Bou.gam.pred$se.fit))/101.2))
+names(Bou.models) <- c("AvgDens020","boupreds","bouymin","bouymax")
+
+
+Coy.models <- as.data.frame(cbind(coyR,exp(Coy.gam.pred$fit)/44,
+                                  exp(c(Coy.gam.pred$fit-1.96*Coy.gam.pred$se.fit))/44,
+                                  exp(c(Coy.gam.pred$fit+1.96*Coy.gam.pred$se.fit))/44))
+names(Coy.models) <- c("AvgDens020","coypreds","coyymin","coyymax")
+
+Bob.models <- as.data.frame(cbind(bobR,exp(Bob.gam.pred$fit)/43.7,
+                                  exp(c(Bob.gam.pred$fit-1.96*Bob.gam.pred$se.fit))/43.7,
+                                  exp(c(Bob.gam.pred$fit+1.96*Bob.gam.pred$se.fit))/43.7))
+names(Bob.models) <- c("AvgDens020","bobpreds","bobymin","bobymax")
+
+
+Cou.models <- as.data.frame(cbind(couR,exp(Cou.gam.pred$fit)/71.1,
+                                  exp(c(Cou.gam.pred$fit-1.96*Cou.gam.pred$se.fit))/71.1,
+                                  exp(c(Cou.gam.pred$fit+1.96*Cou.gam.pred$se.fit))/71.1))
+names(Cou.models) <- c("AvgDens020","coupreds","couymin","couymax")
+
+all.models <- left_join(Moo.models,Bou.models,by="AvgDens020") %>%
+  left_join(.,MooJ.models,by="AvgDens020") %>% 
+  left_join(.,Cou.models,by="AvgDens020") %>% 
+  left_join(.,Coy.models,by="AvgDens020") %>% 
+  left_join(.,Dee.models,by="AvgDens020") %>% 
+  left_join(.,Bob.models,by="AvgDens020") %>% 
+  left_join(.,Wlf.models,by="AvgDens020")
+
+
+deeDanger <- ggplot(data=all.models)+
+  geom_hline(yintercept=0)+
+  geom_line(aes(x=AvgDens020,y=deepreds-bobpreds,color="Bobcat"),size=2)+
+  geom_line(aes(x=AvgDens020,y=deepreds-coupreds,color="Cougar"),size=2)+
+  geom_line(aes(x=AvgDens020,y=deepreds-coypreds,color="Coyote"),size=2)+
+  geom_line(aes(x=AvgDens020,y=deepreds-wlfpreds,color="Wolf"),size=2)+
+  coord_cartesian(xlim=c(50,500),ylim=c(-.20,.20)) +
+  labs(y=expression(atop("Sink Depth Difference", paste("(As % of Hind Leg Length)"))),
+       x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  scale_colour_manual(values = cols1[1:4],name="Predator")+
+  scale_y_continuous(labels = scales::percent)+
+  theme(legend.position=c(0.85,0.25),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=24),
+        axis.text = element_text(size=24),
+        legend.title=element_text(size=24),
+        legend.text=element_text(size=24))
+jpeg(file="DeeDanger_v2.jpg",width=812, height=502)
+deeDanger
+dev.off()
+
+bouDanger <- ggplot(data=all.models)+
+  geom_hline(yintercept=0)+
+  #  geom_line(aes(x=AvgDens020,y=boupreds-bobpreds,color="Bobcat"),size=2)+
+  #  geom_line(aes(x=AvgDens020,y=boupreds-coupreds,color="Cougar"),size=2)+
+  geom_line(aes(x=AvgDens020,y=boupreds-coypreds,color="Coyote"),size=2)+
+  geom_line(aes(x=AvgDens020,y=boupreds-wlfpreds,color="Wolf"),size=2)+
+  coord_cartesian(xlim=c(50,500),ylim=c(-.20,.20)) +
+  labs(y=expression(atop("Sink Depth Difference", paste("(As % of Hind Leg Length)"))),
+       x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  scale_colour_manual(values = cols1[3:4],name="Predator")+
+  scale_y_continuous(labels = scales::percent)+
+  theme(legend.position=c(0.85,0.2),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=24),
+        axis.text = element_text(size=24),
+        legend.title=element_text(size=24),
+        legend.text=element_text(size=24))
+jpeg(file="BouDanger_v2.jpg",width=812, height=502)
+bouDanger
+dev.off()
+
+mooDanger <- ggplot(data=all.models)+
+  geom_hline(yintercept=0)+
+  #  geom_line(aes(x=AvgDens020,y=boupreds-bobpreds,color="Bobcat"),size=2)+
+  geom_line(aes(x=AvgDens020,y=moopreds-coupreds,color="Cougar"),size=2)+
+  #  geom_line(aes(x=AvgDens020,y=boupreds-coypreds,color="Coyote"),size=2)+
+  geom_line(aes(x=AvgDens020,y=moopreds-wlfpreds,color="Wolf"),size=2)+
+  coord_cartesian(xlim=c(50,500),ylim=c(-.20,.20)) +
+  labs(y=expression(atop("Sink Depth Difference", paste("(As % of Hind Leg Length)"))),
+       x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  scale_colour_manual(values = cols1[c(2,4)],name="Predator")+
+  scale_y_continuous(labels = scales::percent)+
+  theme(legend.position=c(0.85,0.2),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=24),
+        axis.text = element_text(size=24),
+        legend.title=element_text(size=24),
+        legend.text=element_text(size=24))
+jpeg(file="MooDanger_v2.jpg",width=812, height=502)
+mooDanger
+dev.off()
+
+
+mooJDanger <- ggplot(data=all.models)+
+  geom_hline(yintercept=0)+
+#  geom_line(aes(x=AvgDens020,y=moojpreds-bobpreds,color="Bobcat"),size=2)+
+  geom_line(aes(x=AvgDens020,y=moojpreds-coupreds,color="Cougar"),size=2)+
+ # geom_line(aes(x=AvgDens020,y=moojpreds-coypreds,color="Coyote"),size=2)+
+  geom_line(aes(x=AvgDens020,y=moojpreds-wlfpreds,color="Wolf"),size=2)+
+  coord_cartesian(xlim=c(50,500),ylim=c(-.20,.20)) +
+  labs(y=expression(atop("Sink Depth Difference", paste("(As % of Hind Leg Length)"))),
+       x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw()+
+  scale_colour_manual(values = cols1[c(2,4)],name="Predator")+
+  scale_y_continuous(labels = scales::percent)+
+  theme(legend.position=c(0.85,0.2),
+        text=element_text(family="Helvetica"),
+        axis.title = element_text(size=24),
+        axis.text = element_text(size=24),
+        legend.title=element_text(size=24),
+        legend.text=element_text(size=24))
+jpeg(file="MooJDanger_v2.jpg",width=812, height=502)
+mooJDanger
+dev.off()
+
+
+```
+
+Let's create a table to summarize key points of the above graphs.
+
+```{r peakdanger table,echo=false}
+
+peakDangerResults <- as.data.frame(cbind("Caribou",NA,NA,NA,NA,
+                           NA,NA,NA,NA,
+                           range(all.models[which(c(all.models$boupreds-all.models$coypreds)>0),"AvgDens020"])[1],
+                           range(all.models[which(c(all.models$boupreds-all.models$coypreds)>0),"AvgDens020"])[2],
+                           max(all.models$boupreds-all.models$coypreds,na.rm=T),
+                           all.models[which(c(all.models$boupreds-all.models$coypreds)==
+                                              max(all.models$boupreds-all.models$coypreds,na.rm=T)),"AvgDens020"],
+                           range(all.models[which(c(all.models$boupreds-all.models$wlfpreds)>0),"AvgDens020"])[1],
+                           range(all.models[which(c(all.models$boupreds-all.models$wlfpreds)>0),"AvgDens020"])[2],
+                           max(all.models$boupreds-all.models$wlfpreds,na.rm=T),
+                           all.models[which(c(all.models$boupreds-all.models$wlfpreds)==
+                                              max(all.models$boupreds-all.models$wlfpreds,na.rm=T)),"AvgDens020"]))
+names(peakDangerResults) <- c("PreySpecies","BobZoneStart","BobZoneEnd","BobZonePeak","BobZonePeakDens",
+                              "CouZoneStart","CouZoneEnd","CouZonePeak","CouZonePeakDens",
+                              "CoyZoneStart","CoyZoneEnd","CoyZonePeak","CoyZonePeakDens",
+                              "WlfZoneStart","WlfZoneEnd","WlfZonePeak","WlfZonePeakDens")
+
+
+
+deerDanger <- cbind("Deer",
+  range(all.models[which(c(all.models$deepreds-all.models$bobpreds)>0),"AvgDens020"])[1],
+  range(all.models[which(c(all.models$deepreds-all.models$bobpreds)>0),"AvgDens020"])[2],
+  max(all.models$deepreds-all.models$bobpreds,na.rm=T),
+  all.models[which(c(all.models$deepreds-all.models$bobpreds)==
+                     max(all.models$deepreds-all.models$bobpreds,na.rm=T)),"AvgDens020"],
+  
+  range(all.models[which(c(all.models$deepreds-all.models$coupreds)>0),"AvgDens020"])[1],
+  range(all.models[which(c(all.models$deepreds-all.models$coupreds)>0),"AvgDens020"])[2],
+  max(all.models$deepreds-all.models$coupreds,na.rm=T),
+  all.models[which(c(all.models$deepreds-all.models$coupreds)==
+                     max(all.models$deepreds-all.models$coupreds,na.rm=T)),"AvgDens020"],
+  
+  range(all.models[which(c(all.models$deepreds-all.models$coypreds)>0),"AvgDens020"])[1],
+  range(all.models[which(c(all.models$deepreds-all.models$coypreds)>0),"AvgDens020"])[2],
+  max(all.models$deepreds-all.models$coypreds,na.rm=T),
+  all.models[which(c(all.models$deepreds-all.models$coypreds)==
+                     max(all.models$deepreds-all.models$coypreds,na.rm=T)),"AvgDens020"],
+  
+  range(all.models[which(c(all.models$deepreds-all.models$wlfpreds)>0),"AvgDens020"])[1],
+  range(all.models[which(c(all.models$deepreds-all.models$wlfpreds)>0),"AvgDens020"])[2],
+  max(all.models$deepreds-all.models$wlfpreds,na.rm=T),
+  all.models[which(c(all.models$deepreds-all.models$wlfpreds)==
+                     max(all.models$deepreds-all.models$wlfpreds,na.rm=T)),"AvgDens020"]
+  )
+
+mooDanger <- cbind("Moose",
+                    NA,NA,NA,NA,
+                    
+                    range(all.models[which(c(all.models$moopreds-all.models$coupreds)>0),"AvgDens020"])[1],
+                    range(all.models[which(c(all.models$moopreds-all.models$coupreds)>0),"AvgDens020"])[2],
+                    max(all.models$moopreds-all.models$coupreds,na.rm=T),
+                    all.models[which(c(all.models$moopreds-all.models$coupreds)==
+                                       max(all.models$moopreds-all.models$coupreds,na.rm=T)),"AvgDens020"],
+                    
+                    NA,NA,NA,NA,
+                    
+                   range(all.models[which(c(all.models$moopreds-all.models$wlfpreds)>0),"AvgDens020"])[1],
+                    range(all.models[which(c(all.models$moopreds-all.models$wlfpreds)>0),"AvgDens020"])[2],
+                    max(all.models$moopreds-all.models$wlfpreds,na.rm=T),
+                    all.models[which(c(all.models$moopreds-all.models$wlfpreds)==
+                                       max(all.models$moopreds-all.models$wlfpreds,na.rm=T)),"AvgDens020"]
+  )
+
+
+mooJDanger <- cbind("Moose-Juv",
+                    NA,NA,NA,NA,
+                    
+                    range(all.models[which(c(all.models$moojpreds-all.models$coupreds)>0),"AvgDens020"])[1],
+                    range(all.models[which(c(all.models$moojpreds-all.models$coupreds)>0),"AvgDens020"])[2],
+                    max(all.models$moojpreds-all.models$coupreds,na.rm=T),
+                    all.models[which(c(all.models$moojpreds-all.models$coupreds)==
+                                       max(all.models$moojpreds-all.models$coupreds,na.rm=T)),"AvgDens020"],
+                    
+                   NA,NA,NA,NA,
+                    
+                    range(all.models[which(c(all.models$moojpreds-all.models$wlfpreds)>0),"AvgDens020"])[1],
+                    range(all.models[which(c(all.models$moojpreds-all.models$wlfpreds)>0),"AvgDens020"])[2],
+                    max(all.models$moojpreds-all.models$wlfpreds,na.rm=T),
+                    all.models[which(c(all.models$moojpreds-all.models$wlfpreds)==
+                                       max(all.models$moojpreds-all.models$wlfpreds,na.rm=T)),"AvgDens020"]
+  )
+
+
+peakDangerResults[2,] <- deerDanger
+peakDangerResults[3,] <- mooDanger
+peakDangerResults[4,] <- mooJDanger
+
+
+peakDangerResults
+
+write.csv(peakDangerResults,"PeakDangerResults.csv")
+
+```
+
+
+### Part 7: Supplementary Materials / Odds and Ends
+
+#### Table S1: Full depth moose pits
+
+Display a correlation table then results table.
+```{r full depth,echo=FALSE}
+
+trax <- read.csv("./FullDepthMoosePitsData_populated.csv")
+traxDensOnly <- trax[,c(3:10)]
+cor(traxDensOnly)
+
+lm010 <- lm(AvgTrackDepth~X0.10,data=trax)
+lm020 <- lm(AvgTrackDepth~X0.20,data=trax)
+lm030 <- lm(AvgTrackDepth~X0.30,data=trax)
+lm040 <- lm(AvgTrackDepth~X0.40,data=trax)
+lm050 <- lm(AvgTrackDepth~X0.50,data=trax)
+lm060 <- lm(AvgTrackDepth~X0.60,data=trax)
+lm070 <- lm(AvgTrackDepth~X0.70,data=trax)
+lm080 <- lm(AvgTrackDepth~X0.80,data=trax)
+lm090 <- lm(AvgTrackDepth~X0.90,data=trax)
+
+mname <- seq(10,80,by=10)
+devExpl <- rep(1,8)
+devExpl[1] <- summary(lm010)$dev.expl
+devExpl[2] <- summary(lm020)$dev.expl
+devExpl[3] <- summary(lm030)$dev.expl
+devExpl[4] <- summary(lm040)$dev.expl
+devExpl[5] <- summary(lm050)$dev.expl
+devExpl[6] <- summary(lm060)$dev.expl
+devExpl[7] <- summary(lm070)$dev.expl
+devExpl[8] <- summary(lm080)$dev.expl
+
+rSq <- rep(1,8)
+rSq[1] <- summary(lm010)$r.sq
+rSq[2] <- summary(lm020)$r.sq
+rSq[3] <- summary(lm030)$r.sq
+rSq[4] <- summary(lm040)$r.sq
+rSq[5] <- summary(lm050)$r.sq
+rSq[6] <- summary(lm060)$r.sq
+rSq[7] <- summary(lm070)$r.sq
+rSq[8] <- summary(lm080)$r.sq
+
+FullDepthRes <- as.data.frame(cbind(mname,devExpl,rSq))
+names(FullDepthRes) <- c("ModelName","DevianceExplained","RSq")
+FullDepthRes
+#write.csv(FullDepthRes,"FullDepthRes.csv")
+```
+
+#### Table S2: Variable correlation
+
+Correlation between all variables (hidden in output).
+
+```{r Correlation Table, echo=FALSE}
+#First, check correlation - for this, we only want numeric cols
+#nonfactDat <- dat[,!names(dat) %in% c("PitID","AvgTrackDepth","Region","Date","Species","sppFact","regFact")]
+#cor(nonfactDat)
+#corRes <- cor(nonfactDat)
+#write.csv(corRes,"Variable_Correlations.csv")
+
+```
+
+#### Figure S1: Density x snow class
+
+Since this one requires a large raster dataset (freely available from Sturm & Liston 2021), this will be entirely commented out and won't run unless you download the raster data. Included here for completeness.
+
+```{r snow class density,echo=FALSE}
+
+#veg <- read.csv("/Users/bensullender/Downloads/PitVegType.csv")
+
+#library(terra)
+#library(sf)
+#sc <- rast("/Users/bensullender/Documents/UW/Research/SnowData/SnowClasses/SnowClass_NA_01km_30.0arcsec_2021_v01.0.tif")
+#ptDat <- inTrax
+#ptDat <- ptDat[ptDat$Vegetation.Type!="Road",]
+#ptDat2 <- ptDat[!is.na(ptDat$Latitude),]
+#ptDat2$Longitude <- as.numeric(ptDat2$Longitude)
+#ptDat2 <- ptDat[!is.na(ptDat2$Longitude),]
+#ptDat3 <- ptDat2 %>%
+#  dplyr::select(PitID,Latitude,Longitude,AvgDens020,TotalIce50)
+#ptDat3 <- na.omit(ptDat3)
+
+#ptDatSF <- st_as_sf(ptDat3,coords=c("Longitude","Latitude"),crs="4326")
+#ptDatSV <- vect(ptDatSF)
+#pVals <- terra::extract(sc,ptDatSV)
+#ptDatSV$SnowClass <- pVals[,-1]
+#ptData <- st_drop_geometry(st_as_sf(ptDatSV))
+
+#ptData <- na.omit(ptData)
+#ptData[ptData$SnowClass==1,'SnowClass'] <- "Tundra"
+#ptData[ptData$SnowClass==2,'SnowClass'] <- "Boreal Forest"
+#ptData[ptData$SnowClass==3,'SnowClass'] <- "Maritime"
+#ptData[ptData$SnowClass==4,'SnowClass'] <- "Ephemeral"
+#ptData[ptData$SnowClass==5,'SnowClass'] <- "Prairie"
+#ptData[ptData$SnowClass==6,'SnowClass'] <- "Montane Forest"
+
+#maritimeDropped <- as.data.frame(cbind(c("TR-0208-A-BOB-02-MV","BC-0213-B-MRT-01-MV"),
+#                                       c(280.25,235.25),c(1,0),c("Maritime","Maritime")))
+#names(maritimeDropped) <- c("PitID","AvgDens020","TotalIce50","SnowClass")
+#maritimeDropped$AvgDens020 <- as.numeric(maritimeDropped$AvgDens020)
+#maritimeDropped$TotalIce50 <- as.numeric(maritimeDropped$TotalIce50)
+#ptData <- rbind(ptData,maritimeDropped)
+
+
+#ptData$SnowClass <- factor(ptData$SnowClass,levels=c("Tundra","Boreal Forest","Maritime",
+#                                                     "Ephemeral","Prairie","Montane Forest"))
+
+#colsSC <- c("Tundra" = "#df72ff","Boreal Forest" = "#73b2ff", "Maritime" = "#ff7f7e",
+#            "Ephemeral" = "#e1e1e1","Prairie" = "#ffd380","Montane Forest" = "#38a700")
+
+
+
+#ggplot(data=ptData)+
+#  geom_boxplot(aes(x=SnowClass,y=AvgDens020,fill=SnowClass))+
+#  scale_fill_manual(name="Snow Class",values=colsSC)+
+#  labs(y=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'),x="Snow Class")+
+#  theme_bw()+
+#  theme(text=element_text(family="Helvetica"),
+#          axis.title = element_text(size=14),
+#           axis.text = element_text(size=14),
+#           legend.title=element_text(size=14),
+#           legend.text=element_text(size=14))
+
+#iceAOV <- aov(TotalIce50~SnowClass,data=ptData)
+#summary(iceAOV)
+#densAOV <- aov(AvgDens020~SnowClass,data=ptData)
+#densTuk <- TukeyHSD(densAOV)
+#densTuk
+#ptData %>%
+#  group_by(SnowClass) %>%
+#  summarise(nobs = n(),AvgDens = mean(AvgDens020))
+
+#iceAOV <- aov(TotalIce50~SnowClass,data=ptData)
+#iceTuk <- TukeyHSD(iceAOV)
+#iceTuk
+
+```
+
+
+#### Figure S2: track size by region
+
+```{r track size x region,echo=FALSE}
+trackSize <- inTrax[inTrax$Species %in% c("Moose","Coyote","Wolf"),]
+trackSize$Region <- as.factor(trackSize$Region)
+trackSize$Reg2 <- NA
+trackSize$Reg2[trackSize$Region=="DENA"] <- "AK"
+trackSize$Reg2[trackSize$Region %in% c("MV","NE")] <- "WA"
+trackSize$Reg2 <- as.factor(trackSize$Reg2)
+
+colsTracks <- c("AK" = "#df72ff","WA" = "#38a700")
+
+jpeg(file="FigSupp3AB_tracksize.jpg",width=500, height=600)
+ggplot(data=trackSize)+
+  geom_boxplot(aes(x=Species,y=(c(pi*(Track.length/2)*(Track.width/2))),fill=Reg2))+
+  scale_fill_manual(name="Study Region",values=colsTracks)+
+  labs(y=bquote('Track Surface Area ('~cm^2*')'),x="Species")+
+  theme_bw()+
+  theme(legend.position=c(0.2,0.5),
+            text=element_text(family="Helvetica"),
+          axis.title = element_text(size=20),
+           axis.text = element_text(size=20),
+           legend.title=element_text(size=20),
+           legend.text=element_text(size=20))
+dev.off()
+trackAOVDat <- trackSize %>%
+  mutate(Area = c(pi*(Track.length/2)*(Track.width/2))) %>%
+  dplyr::select(Area,Species,Reg2)
+trackAOVDat <- na.omit(trackAOVDat)
+
+CoyTrackReg <- aov(Area~Reg2,data=trackAOVDat[trackAOVDat$Species=="Coyote",])
+summary(CoyTrackReg)
+CoyTrackTuk <- TukeyHSD(CoyTrackReg)
+CoyTrackTuk
+
+WlfTrackReg <- aov(Area~Reg2,data=trackAOVDat[trackAOVDat$Species=="Wolf",])
+summary(WlfTrackReg)
+WlfTrackTuk <- TukeyHSD(WlfTrackReg)
+WlfTrackTuk
+
+MooTrackReg <- aov(Area~Reg2,data=trackAOVDat[trackAOVDat$Species=="Moose",])
+summary(MooTrackReg)
+MooTrackTuk <- TukeyHSD(MooTrackReg)
+MooTrackTuk
+
+```
+
+
+#### Tuna vs dens
+```{r tuna vs dens,echo=FALSE}
+
+tunaDensDat <- inTrax[,c("AvgTuna","AvgDens010","AvgDens020")]
+tunaDensDat <- na.omit(tunaDensDat)
+tunaLM <- lm(log(AvgDens020)~AvgTuna,data=tunaDensDat)
+summary(tunaLM)
+tunaLM10 <- lm(log(AvgDens010)~AvgTuna,data=tunaDensDat)
+summary(tunaLM10)
+
+jpeg(file="TunaSuppFig.jpg",width=812, height=502)
+ggplot(aes(x=AvgTuna,y=log(AvgDens020)),data=tunaDensDat) +
+  geom_point(aes(x=AvgTuna,y=log(AvgDens020)))+
+  geom_smooth(method="lm",color="black")+
+  labs(y="Ln of Average Snow Density \n Top 20cm (kg/m^3)",x="Average Tuna Can Sink Depth (cm)")+
+  theme_bw(base_size=14)+
+  theme(text=element_text(family="Helvetica"))
+dev.off()
+
+```
+
+
+### Part 8: Not used in this draft, but potentially useful
+
+#### Predator-Prey Pair Plots
+
+Now that we've got a grasp on the best models for each species, we can use these regression models to predict sink depths for each species and plot predator-prey pairs.
+
+```{r Predict Values, echo=FALSE}
+
+Bou.seg.win <- winnerBou
+Dee.seg.win <- segmented(winnerDee,seg.Z=~AvgDens020,npsi=1)
+Moo.seg.win <- winnerMoo
+Bob.seg.win <- segmented(winnerBob,seg.Z=~AvgDens020,npsi=1)
+Coy.seg.win <- segmented(winnerCoy,seg.Z=~AvgDens020,npsi=1)
+Cou.seg.win <- segmented(winnerCou,seg.Z=~AvgDens020,npsi=1)
+Wlf.seg.win <- segmented(winnerWlf,seg.Z=~AvgDens020,npsi=1)
+
+get.preds <- function(inSpp){
+  datt <- dat[dat$Species==inSpp,]
+  spMin <- min(datt$AvgDens020)
+  spMax <- max(datt$AvgDens020)
+  densRange <- seq(from=round(spMin),to=round(spMax),by=0.5)
+  densRange <- as.data.frame(densRange)
+  names(densRange) <- c("AvgDens020")
+  return(densRange)
+}
+
+
+bobR <- get.preds("Bobcat")
+coyR <- get.preds("Coyote")
+couR <- get.preds("Cougar")
+bouR <- get.preds("Caribou")
+deeR <- get.preds("Deer")
+mooR <- get.preds("Moose")
+wlfR <- get.preds("Wolf")
+
+Bou.pred <- as.data.frame(cbind(predict(Bou.seg.win,newdata=bouR,interval = "confidence"),bouR))
+Dee.pred <- as.data.frame(cbind(predict.segmented(Dee.seg.win,newdata=deeR,interval = "confidence"),deeR))
+Moo.pred <- as.data.frame(cbind(predict(Moo.seg.win,newdata=mooR,interval = "confidence"),mooR))
+Bob.pred <- as.data.frame(cbind(predict.segmented(Bob.seg.win,newdata=bobR,interval = "confidence"),bobR))
+Coy.pred <- as.data.frame(cbind(predict.segmented(Coy.seg.win,newdata=coyR,interval = "confidence"),coyR))
+Cou.pred <- as.data.frame(cbind(predict.segmented(Cou.seg.win,newdata=couR,interval = "confidence"),couR))
+Wlf.pred <- as.data.frame(cbind(predict.segmented(Wlf.seg.win,newdata=wlfR,interval = "confidence"),wlfR))
+
+#Limit all below 0 to 0, since we can't physically have less than 0 sink depth.
+Bou.pred[Bou.pred$lwr<0,"lwr"] <- 0
+Bou.pred[Bou.pred$fit<0,"fit"] <- 0
+
+Dee.pred[Dee.pred$lwr<0,"lwr"] <- 0
+Dee.pred[Dee.pred$fit<0,"fit"] <- 0
+
+Moo.pred[Moo.pred$lwr<0,"lwr"] <- 0
+Moo.pred[Moo.pred$fit<0,"fit"] <- 0
+
+Bob.pred[Bob.pred$lwr<0,"lwr"] <- 0
+Bob.pred[Bob.pred$fit<0,"fit"] <- 0
+
+Coy.pred[Coy.pred$lwr<0,"lwr"] <- 0
+Coy.pred[Coy.pred$fit<0,"fit"] <- 0
+
+Cou.pred[Cou.pred$lwr<0,"lwr"] <- 0
+Cou.pred[Cou.pred$fit<0,"fit"] <- 0
+
+Wlf.pred[Wlf.pred$lwr<0,"lwr"] <- 0
+Wlf.pred[Wlf.pred$fit<0,"fit"] <- 0
+
+
+```
+
+Now for some plots.
+
+```{r Pred-Prey Plots, echo=FALSE}
+
+palette1 <- brewer.pal(n = 11, name = "Spectral")
+
+cols1 <- c("Bobcat" = "#D8B57D","Cougar" = palette1[4],"Coyote" = palette1[2],"Wolf" = palette1[1],
+           "Caribou"=palette1[9], "Deer" = palette1[10],"Moose" = palette1[11])
+
+cols1
+sp1 <- "Wolf"
+sp2 <- "Moose"
+sp1pred <- as.data.frame(cbind(Wlf.pred,spN=rep(sp1,length(wlfR))))
+sp2pred <- as.data.frame(cbind(Moo.pred,spN=rep(sp2,length(mooR))))
+f1 <- palette1[1]
+f2 <- palette1[11]
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp1),fill=f1, 
+              alpha=0.3,linetype=0,size=1,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp2),fill=f2,
+              alpha=0.3,linetype=0,size=1,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp1),size=3,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp2),size=3,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit,color=sp1),size=2,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit,color=sp2),size=2,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                     values = cols1)
+
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw(base_size=24)+
+  coord_cartesian(xlim=c(50,600),ylim=c(0,80))+ 
+  theme(legend.position="none",
+        text=element_text(family="Helvetica"),
+        axis.text = element_text(size=24),
+        legend.title=element_text(size=24),
+        legend.text=element_text(size=24))
+
+#
+# Bob-Dee
+#
+cols1 <- c("Bobcat" = "#D8B57D","Cougar" = palette1[4],"Coyote" = palette1[2],"Wolf" = palette1[1],
+           "Caribou"=palette1[9], "Deer" = palette1[10],"Moose" = palette1[11])
+
+sp1 <- "Bobcat"
+sp2 <- "Deer"
+sp1pred <- as.data.frame(cbind(Bob.pred,spN=rep(sp1,length(bobR))))
+sp2pred <- as.data.frame(cbind(Dee.pred,spN=rep(sp2,length(deeR))))
+f1 <- "#D8B57D"
+f2 <- palette1[10]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp1),fill=f1, 
+              alpha=0.3,linetype=0,size=1,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp2),fill=f2,
+              alpha=0.3,linetype=0,size=1,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp1),size=3,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp2),size=3,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit,color=sp1),size=2,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit,color=sp2),size=2,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.position="none",
+        text=element_text(family="Helvetica"),
+        axis.text = element_text(size=24),
+        legend.title=element_text(size=24),
+        legend.text=element_text(size=24))
+
+
+#
+# Coy-Dee
+#
+
+sp1 <- "Coyote"
+sp2 <- "Deer"
+sp1pred <- as.data.frame(cbind(Coy.pred,spN=rep(sp1,length(coyR))))
+sp2pred <- as.data.frame(cbind(Dee.pred,spN=rep(sp2,length(deeR))))
+f1 <- palette1[2]
+f2 <- palette1[10]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp1),fill=f1, 
+              alpha=0.3,linetype=0,size=1,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp2),fill=f2,
+              alpha=0.3,linetype=0,size=1,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp1),size=3,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp2),size=3,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit,color=sp1),size=2,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit,color=sp2),size=2,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 10cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+
+#
+# Coy-Bou
+#
+
+sp1 <- "Coyote"
+sp2 <- "Caribou"
+sp1pred <- as.data.frame(cbind(Coy.pred,spN=rep(sp1,length(coyR))))
+sp2pred <- as.data.frame(cbind(Bou.pred,spN=rep(sp2,length(bouR))))
+f1 <- palette1[2]
+f2 <- palette1[9]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp1),fill=f1, 
+              alpha=0.3,linetype=0,size=1,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp2),fill=f2,
+              alpha=0.3,linetype=0,size=1,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp1),size=3,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp2),size=3,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit,color=sp1),size=2,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit,color=sp2),size=2,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+#
+# Wlf-Dee
+#
+
+sp1 <- "Wolf"
+sp2 <- "Deer"
+sp1pred <- as.data.frame(cbind(Wlf.pred,spN=rep(sp1,length(wlfR))))
+sp2pred <- as.data.frame(cbind(Dee.pred,spN=rep(sp2,length(deeR))))
+f1 <- palette1[1]
+f2 <- palette1[10]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp1),fill=f1, 
+              alpha=0.3,linetype=0,size=1,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp2),fill=f2,
+              alpha=0.3,linetype=0,size=1,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp1),size=3,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp2),size=3,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit,color=sp1),size=2,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit,color=sp2),size=2,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+#
+# Wlf - Bou
+#
+
+sp1 <- "Wolf"
+sp2 <- "Caribou"
+sp1pred <- as.data.frame(cbind(Wlf.pred,spN=rep(sp1,length(wlfR))))
+sp2pred <- as.data.frame(cbind(Bou.pred,spN=rep(sp2,length(bouR))))
+f1 <- palette1[1]
+f2 <- palette1[9]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp1),fill=f1, 
+              alpha=0.3,linetype=0,size=1,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp2),fill=f2,
+              alpha=0.3,linetype=0,size=1,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp1),size=3,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp2),size=3,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit,color=sp1),size=2,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit,color=sp2),size=2,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 10cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+
+
+
+#
+# Cou-Dee
+#
+
+sp1 <- "Cougar"
+sp2 <- "Deer"
+sp1pred <- as.data.frame(cbind(Cou.pred,spN=rep(sp1,length(couR))))
+sp2pred <- as.data.frame(cbind(Dee.pred,spN=rep(sp2,length(deeR))))
+f1 <- palette1[4]
+f2 <- palette1[10]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp1),fill=f1, 
+              alpha=0.3,linetype=0,size=1,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp2),fill=f2,
+              alpha=0.3,linetype=0,size=1,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp1),size=3,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp2),size=3,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit,color=sp1),size=2,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit,color=sp2),size=2,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+
+
+
+
+#
+# Cou-Moo
+#
+
+sp1 <- "Cougar"
+sp2 <- "Moose"
+sp1pred <- as.data.frame(cbind(Cou.pred,spN=rep(sp1,length(couR))))
+sp2pred <- as.data.frame(cbind(Moo.pred,spN=rep(sp2,length(mooR))))
+f1 <- palette1[4]
+f2 <- palette1[11]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp1),fill=f1, 
+              alpha=0.3,linetype=0,size=1,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr, ymax=upr,color=sp2),fill=f2,
+              alpha=0.3,linetype=0,size=1,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp1),size=3,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth,color=sp2),size=3,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit,color=sp1),size=2,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit,color=sp2),size=2,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,600),ylim=c(0,80))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+```
+
+
+#### Relative depth plots
+
+```{r relative plots,echo=FALSE}
+
+
+#all the above, just each one divided by leg length
+
+palette1 <- brewer.pal(n = 11, name = "Spectral")
+cols1 <- c("Wolf" = palette1[1],"Coyote" = palette1[2],
+           "Cougar" = palette1[4],"Bobcat" = palette1[5],
+           "Caribou"=palette1[9], "Deer" = palette1[10],"Moose" = palette1[11])
+
+sp1 <- "Wolf"
+sp2 <- "Moose"
+sp1pred <- as.data.frame(cbind(Wlf.pred,spN=rep(sp1,length(wlfR))))
+sp2pred <- as.data.frame(cbind(Moo.pred,spN=rep(sp2,length(mooR))))
+f1 <- palette1[1]
+f2 <- palette1[11]
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/65.7, ymax=upr/65.7,color=sp1),fill=f1, 
+              alpha=0.15,linetype=0,size=0.5,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/123.8, ymax=upr/123.8,color=sp2),fill=f2,
+              alpha=0.15,linetype=0,size=0.5,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth/65.7,color=sp1),size=2,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth/123.8,color=sp2),size=2,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit/65.7,color=sp1),size=1,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit/123.8,color=sp2),size=1,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+
+predpreyPlot +
+ labs( y=expression(atop("Sink Depth", paste("(As % of Hind Leg Length)"))),
+       x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,600),ylim=c(0,1))+ 
+  scale_y_continuous(labels = scales::percent)+
+
+
+#
+# Bob-Dee
+#
+
+sp1 <- "Bobcat"
+sp2 <- "Deer"
+sp1pred <- as.data.frame(cbind(Bob.pred,spN=rep(sp1,length(bobR))))
+sp2pred <- as.data.frame(cbind(Dee.pred,spN=rep(sp2,length(deeR))))
+f1 <- palette1[5]
+f2 <- palette1[10]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/43.7, ymax=upr/43.7,color=sp1),fill=f1, 
+              alpha=0.15,linetype=0,size=0.5,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/79.55, ymax=upr/79.55,color=sp2),fill=f2,
+              alpha=0.15,linetype=0,size=0.5,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth/43.7,color=sp1),size=2,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth/79.55,color=sp2),size=2,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit/43.7,color=sp1),size=1,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit/79.55,color=sp2),size=1,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+#
+# Coy-Dee
+#
+
+sp1 <- "Coyote"
+sp2 <- "Deer"
+sp1pred <- as.data.frame(cbind(Coy.pred,spN=rep(sp1,length(coyR))))
+sp2pred <- as.data.frame(cbind(Dee.pred,spN=rep(sp2,length(deeR))))
+f1 <- palette1[2]
+f2 <- palette1[10]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/44, ymax=upr/44,color=sp1),fill=f1, 
+              alpha=0.15,linetype=0,size=0.5,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/79.55, ymax=upr/79.55,color=sp2),fill=f2,
+              alpha=0.15,linetype=0,size=0.5,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth/44,color=sp1),size=2,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth/79.55,color=sp2),size=2,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit/44,color=sp1),size=1,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit/79.55,color=sp2),size=1,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 10cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+
+#
+# Coy-Bou
+#
+
+sp1 <- "Coyote"
+sp2 <- "Caribou"
+sp1pred <- as.data.frame(cbind(Coy.pred,spN=rep(sp1,length(coyR))))
+sp2pred <- as.data.frame(cbind(Bou.pred,spN=rep(sp2,length(bouR))))
+f1 <- palette1[2]
+f2 <- palette1[9]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/44, ymax=upr/44,color=sp1),fill=f1, 
+              alpha=0.15,linetype=0,size=0.5,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/101.2, ymax=upr/101.2,color=sp2),fill=f2,
+              alpha=0.15,linetype=0,size=0.5,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth/44,color=sp1),size=2,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth/101.2,color=sp2),size=2,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit/44,color=sp1),size=1,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit/101.2,color=sp2),size=1,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+#
+# Wlf-Dee
+#
+
+sp1 <- "Wolf"
+sp2 <- "Deer"
+sp1pred <- as.data.frame(cbind(Wlf.pred,spN=rep(sp1,length(wlfR))))
+sp2pred <- as.data.frame(cbind(Dee.pred,spN=rep(sp2,length(deeR))))
+f1 <- palette1[1]
+f2 <- palette1[10]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/65.7, ymax=upr/65.7,color=sp1),fill=f1, 
+              alpha=0.15,linetype=0,size=0.5,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/79.55, ymax=upr/79.55,color=sp2),fill=f2,
+              alpha=0.15,linetype=0,size=0.5,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth/65.7,color=sp1),size=2,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth/79.55,color=sp2),size=2,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit/65.7,color=sp1),size=1,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit/79.55,color=sp2),size=1,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+#
+# Wlf - Bou
+#
+
+sp1 <- "Wolf"
+sp2 <- "Caribou"
+sp1pred <- as.data.frame(cbind(Wlf.pred,spN=rep(sp1,length(wlfR))))
+sp2pred <- as.data.frame(cbind(Bou.pred,spN=rep(sp2,length(bouR))))
+f1 <- palette1[1]
+f2 <- palette1[9]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/65.7, ymax=upr/65.7,color=sp1),fill=f1, 
+              alpha=0.15,linetype=0,size=0.5,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/101.2, ymax=upr/101.2,color=sp2),fill=f2,
+              alpha=0.15,linetype=0,size=0.5,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth/65.7,color=sp1),size=2,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth/101.2,color=sp2),size=2,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit/65.7,color=sp1),size=1,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit/101.2,color=sp2),size=1,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 10cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+
+
+
+#
+# Cou-Dee
+#
+
+sp1 <- "Cougar"
+sp2 <- "Deer"
+sp1pred <- as.data.frame(cbind(Cou.pred,spN=rep(sp1,length(couR))))
+sp2pred <- as.data.frame(cbind(Dee.pred,spN=rep(sp2,length(deeR))))
+f1 <- palette1[4]
+f2 <- palette1[10]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/71.1, ymax=upr/71.1,color=sp1),fill=f1, 
+              alpha=0.15,linetype=0,size=0.5,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/79.55, ymax=upr/79.55,color=sp2),fill=f2,
+              alpha=0.15,linetype=0,size=0.5,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth/71.1,color=sp1),size=2,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth/79.55,color=sp2),size=2,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit/71.1,color=sp1),size=1,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit/79.55,color=sp2),size=1,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,500),ylim=c(0,60))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+
+
+
+
+#
+# Cou-Moo
+#
+
+sp1 <- "Cougar"
+sp2 <- "Moose"
+sp1pred <- as.data.frame(cbind(Cou.pred,spN=rep(sp1,length(couR))))
+sp2pred <- as.data.frame(cbind(Moo.pred,spN=rep(sp2,length(mooR))))
+f1 <- palette1[4]
+f2 <- palette1[11]
+
+pairDat <- rbind(dat[dat$Species==sp1,],dat[dat$Species==sp2,])
+predpreyPlot <- ggplot()+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/71.1, ymax=upr/71.1,color=sp1),fill=f1, 
+              alpha=0.15,linetype=0,size=0.5,data=sp1pred)+
+  geom_ribbon(aes(x=AvgDens020,ymin=lwr/123.8, ymax=upr/123.8,color=sp2),fill=f2,
+              alpha=0.15,linetype=0,size=0.5,data=sp2pred)+
+  geom_point(aes(AvgDens020,AvgTrackDepth/71.1,color=sp1),size=2,data=pairDat[pairDat$Species==sp1,])+
+  geom_point(aes(AvgDens020,AvgTrackDepth/123.8,color=sp2),size=2,data=pairDat[pairDat$Species==sp2,])+
+  geom_line(aes(AvgDens020,fit/71.1,color=sp1),size=1,data=sp1pred)+
+  geom_line(aes(AvgDens020,fit/123.8,color=sp2),size=1,data=sp2pred)+
+  scale_color_manual(name = 'Species', 
+                      values = cols1)
+predpreyPlot +
+  labs(y="Track Sink Depth (cm)",x=bquote('Average Snow Density, Top 20cm (kg /'~m^3*')'),
+       title=paste0(sp1," vs. ",sp2))+
+  theme_bw(base_size=14)+
+  coord_cartesian(xlim=c(50,600),ylim=c(0,80))+ 
+  theme(legend.key = element_rect(color = NA, fill = NA),
+  legend.key.size = unit(1, "cm")) +
+  theme(legend.title.align = 0.5)
+
+
+
+
+
+```
